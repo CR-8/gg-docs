@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Node tools build.py runs (frontend dependency graph).",
+  "devDependencies": {
+    "dependency-cruiser": "18.5.0",
+    "typescript": "5.9.3"
+  }
+}

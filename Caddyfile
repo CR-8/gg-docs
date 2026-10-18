@@ -1,0 +1,8 @@
+{$DOMAIN} {
+	handle /sonar* {
+		reverse_proxy sonarqube:9000
+	}
+	handle {
+		reverse_proxy portal:7000
+	}
+}

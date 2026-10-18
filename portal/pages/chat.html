@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ask the portal</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><nav></nav>
+<h1>Ask the portal</h1>
+<p class="muted">Answers come from the portal's own data: git history, pushes, CI results, review findings, SonarQube
+and the code graph. Each answer lists the lookups it made.</p>
+<div class="row" id="examples"></div>
+<div id="log"></div>
+<form id="f" class="row" style="align-items:flex-end">
+  <textarea name="q" rows="2" style="flex:1;min-width:240px" placeholder="e.g. whose push last broke v2-module-tests?"></textarea>
+  <button class="primary">Ask</button><button type="button" id="clear">New chat</button>
+</form>
+<script type="module">
+import {api, nav, h} from "/static/app.js";
+import {marked} from "https://cdn.jsdelivr.net/npm/marked@18.0.14/lib/marked.esm.js";
+import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.es.mjs";
+nav("/chat");
+
+const EXAMPLES = ["Who pushed to the default branches this week, and what?", "Whose push last broke CI, and is it fixed?",
+  "Rank people by weighted review findings per 1k lines over 90 days", "Which modules does the VMIS service depend on?"];
+const log = document.getElementById("log"), form = document.getElementById("f");
+const KEY = "portal-chat";
+let history = [];
+try { history = JSON.parse(sessionStorage.getItem(KEY) || "[]"); } catch {}
+const save = () => { try { sessionStorage.setItem(KEY, JSON.stringify(history)); } catch {} };
+// Model output can quote commit messages and diffs: render markdown, then sanitise.
+const md = text => DOMPurify.sanitize(marked.parse(text || ""));
+
+function render() {
+  log.innerHTML = history.map(m => m.role === "user"
+    ? `<div class="msg user">${h(m.content)}</div>`
+    : `<div class="msg">${md(m.content)}${m.steps && m.steps.length ? `<details><summary class="muted">${m.steps.length} lookup${m.steps.length > 1 ? "s" : ""}</summary>${
+        m.steps.map(s => `<div><b>${h(s.tool)}</b> <code>${h(JSON.stringify(s.input))}</code><pre style="max-height:200px;overflow:auto"><code>${h(s.output)}</code></pre></div>`).join("")}</details>` : ""}</div>`).join("");
+}
+
+async function ask(question) {
+  history.push({role: "user", content: question});
+  render();
+  log.insertAdjacentHTML("beforeend", '<div class="msg muted" id="wait">Looking it up...</div>');
+  form.querySelector("button").disabled = true;
+  try {
+    const prior = history.slice(0, -1).map(({role, content}) => ({role, content}));
+    const r = await api("/api/chat", {method: "POST", body: JSON.stringify({history: prior, question})});
+    history.push({role: "assistant", content: r.answer, steps: r.steps});
+  } catch (e) {
+    history.push({role: "assistant", content: `**Error:** ${e.message}`});
+  }
+  form.querySelector("button").disabled = false;
+  save();
+  render();
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+document.getElementById("examples").innerHTML = EXAMPLES.map(q => `<button type="button" class="ex">${h(q)}</button>`).join("");
+document.querySelectorAll(".ex").forEach(b => b.onclick = () => ask(b.textContent));
+form.onsubmit = e => { e.preventDefault(); const q = form.elements.q.value.trim(); if (q) { form.elements.q.value = ""; ask(q); } };
+form.elements.q.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } };
+document.getElementById("clear").onclick = () => { history = []; save(); render(); };
+render();
+</script>
+</body></html>
