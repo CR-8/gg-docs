@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 import httpx
 
 from . import (BACKEND_REPO, BACKFILL_DAYS, DATA, DEFAULT_BRANCHES, FRONTEND_REPO, GIT_URL, POLL_SECONDS, REPOS,
-               ROOT, SITE, SONAR_KEYS, SONAR_URL, WORK, db, repo_dir)
+               ROOT, SITE, SONAR_KEYS, SONAR_URL, WORK, db, llm, repo_dir)
 from .github import gh
 
 ZERO = "0" * 40
@@ -244,6 +244,15 @@ def check_head(repo):
         enqueue("review_push", repo, branch, seen, head)
 
 
+def poll_prs(repo):
+    """Webhooks normally start PR reviews; this catches open PRs whose events never arrived
+    (e.g. the portal's port is firewalled to office IPs)."""
+    for pr in gh.paginate(f"/repos/{repo}/pulls", limit=100, state="open"):
+        if not pr["draft"] and not db.q("SELECT 1 FROM reviews WHERE repo=? AND pr=? AND head_sha=?",
+                                         repo, pr["number"], pr["head"]["sha"]):
+            enqueue("review_pr", repo, pr["number"])
+
+
 def sync(repo):
     fetch(repo)
     n = ingest_commits(repo)
@@ -251,6 +260,8 @@ def sync(repo):
         learn_identities(repo)
         ingest_push_events(repo)
         ingest_checks(repo)
+        if llm.configured():
+            poll_prs(repo)
     check_head(repo)
     log("sync", f"{repo}: {n} new commits")
 
