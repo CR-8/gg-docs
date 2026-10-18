@@ -208,10 +208,12 @@ Admins choose in **Settings**:
 
 ### 1.11 Login and security
 
-- **Sign in with GitHub.** The GitHub App's OAuth flow, with a random `state` checked on return. After login, the portal checks with the App's installation token that the user is a member of `GITHUB_ORG`; non-members are refused.
+- **Two ways to log in**, either or both:
+  - **Passwords** (`PORTAL_PASSWORD` for viewers, `ADMIN_PASSWORD` for admins). `install.sh` generates them. Wrong guesses are slowed down.
+  - **Sign in with GitHub**, when the GitHub App is set up. It uses the App's OAuth flow, with a random `state` checked on return. After login, the portal checks with the App's installation token that the user is a member of `GITHUB_ORG`; non-members are refused.
 - **Session:** a cookie signed with `SESSION_SECRET`, `SameSite=Lax`, `Secure` when `PUBLIC_URL` is https, valid for 7 days.
 - **Every page and API needs a login**, except `/auth/*`, `/healthz` and the webhook (which needs a valid signature instead).
-- **Admins** (`ADMINS`, GitHub logins) are the only ones who can change Settings, test the LLM, or trigger sync, rebuild and review.
+- **Admins** (the admin password, or GitHub logins listed in `ADMINS`) are the only ones who can change Settings, test the LLM, or trigger sync, rebuild and review.
 - **Secrets:** the GitHub App private key is a mounted file (`secrets/github-app.pem`, read-only). LLM and Sonar keys sit in the database volume and are never sent to browsers. The container runs as a non-root user.
 - **Untrusted text** (diffs, commit messages, review text) is shown escaped. Chatbot answers are rendered as Markdown and sanitised with DOMPurify.
 - `DEV_USER` (automatic login for local development) only works when GitHub login is **not** configured and only for requests from the same machine.
@@ -305,17 +307,47 @@ bash install.sh <vm-public-ip>          # e.g. bash install.sh 35.253.245.77
 `install.sh` does everything, and is safe to re-run:
 
 1. Installs Docker and the Compose plugin when they're missing.
-2. Sets the kernel option SonarQube needs.
-3. Pulls the latest code.
-4. Writes `.env`:
+2. Makes sure containers can resolve names (if they can't, points Docker at public DNS).
+3. Sets the kernel option SonarQube needs.
+4. Pulls the latest code.
+5. Writes `.env`:
    - `PUBLIC_URL`, `DOMAIN` and `SONAR_PUBLIC_URL` use **`<ip-with-dashes>.sslip.io`** (e.g. `35-253-245-77.sslip.io`), a free DNS name that points at your IP, so Caddy can get a real HTTPS certificate without you owning a domain.
    - Ports 7000/7010 are bound to localhost.
-   - `SESSION_SECRET`, `SONAR_DB_PASSWORD` and `GITHUB_WEBHOOK_SECRET` are generated once and kept on later runs.
-5. Hands the GitHub App key to the container.
+   - `PORTAL_PASSWORD`, `ADMIN_PASSWORD`, `SESSION_SECRET`, `SONAR_DB_PASSWORD` and `GITHUB_WEBHOOK_SECRET` are generated once and kept on later runs.
 6. Starts the stack with HTTPS and waits until it answers.
-7. Prints the exact **Callback URL, Webhook URL and webhook secret** to enter in the GitHub App, plus anything still missing.
+7. Prints the portal's address, **the viewer and admin passwords**, and anything still needed.
 
-Then:
+**Then give it read access to the repos** (see "GitHub access" just below) and re-run once:
+
+```bash
+GITHUB_TOKEN=<read-only token> bash install.sh <vm-public-ip>
+```
+
+The token is kept in `.env`, so later runs don't need it again. That's all that's needed: the views, activity, people, CI results, reviews in the portal, the chatbot and SonarQube all work. The GitHub App is an optional extra.
+
+#### GitHub access
+
+The two repositories are private, so the portal needs read access to them. Pick a level:
+
+| Level | Set | What works |
+|---|---|---|
+| **Read-only token** (enough) | `GITHUB_TOKEN` | Everything in the portal: architecture views, commits, people, pushes, CI results and breakages, reviews in the portal, chatbot, SonarQube. Updates every 5 minutes. Log in with the portal passwords. |
+| **GitHub App** (optional, adds) | `GITHUB_APP_*` + key (3.1) | Sign in with GitHub (org members only), instant updates through webhooks, and reviews posted on PRs as `genegenius-reviewer[bot]`. When set, it is used instead of the token. |
+| Neither | | The portal and SonarQube run and you can log in, but there's no code to show. Settings → Recent jobs says why. |
+
+**Creating the read-only token:** GitHub → your avatar → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token:
+
+- **Resource owner:** GeneGeniusinc
+- **Repository access:** Only select repositories → `Genegenius-backend`, `Genegenius-phase-1`
+- **Repository permissions, all Read-only:**
+  - Contents and Metadata: the code, commits and push events.
+  - Pull requests: reviews of PRs.
+  - Checks and Commit statuses: CI results.
+- **Expiration:** as your org allows. When it expires, run `GITHUB_TOKEN=<new> bash install.sh <ip>` again.
+
+If GeneGeniusinc requires approval for fine-grained tokens, an org owner approves it under the org's Settings → Personal access tokens. If a permission is missing, only that feature is skipped (shown under Settings → Recent jobs); everything else keeps working.
+
+#### Adding the GitHub App later (optional)
 
 1. Create the GitHub App (3.1) with the URLs the script printed.
 2. Copy its private key to the VM: `scp <key>.pem <user>@<vm-ip>:~/gg-portal/app.pem`
@@ -595,7 +627,8 @@ Set in `.env` (Docker) or the environment (local).
 | `GIT_URL_TEMPLATE` | `https://github.com/{repo}.git` | Where to clone from (`{repo}` = owner/name, `{name}` = name); local development can use folders |
 | `DATA_DIR` / `SITE_DIR` / `WORK_DIR` | `/data`, `/data/site`, `/data/work` | Storage locations |
 | `BACKEND_PYTHON` | venv in `/data/venvs/backend` | Interpreter with the backend's requirements, for the route export |
-| `GITHUB_TOKEN` | | Local development only: a plain token instead of the App |
+| `GITHUB_TOKEN` | | Read-only token for the two repos ("GitHub access" in 3.2); enough for everything except GitHub login, webhooks and posting reviews |
+| `PORTAL_PASSWORD` / `ADMIN_PASSWORD` | generated by `install.sh` | Shared logins: viewer / admin (Settings) |
 | `DEV_USER` | | Local development only: auto-login (see 1.11) |
 | `DISABLE_WORKER` | | `1` runs the web app without the worker and poller |
 | `GRAPHIFY_BIN` | graphify next to Python | Override the graphify executable |
@@ -619,7 +652,8 @@ Set in `.env` (Docker) or the environment (local).
 
 | Symptom | Cause and fix |
 |---|---|
-| "GitHub login is not configured" | Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` |
+| "No login method is configured" | Set `PORTAL_PASSWORD`/`ADMIN_PASSWORD` (re-run `install.sh`), or the GitHub App's client ID and secret |
+| Overview says "The last sync failed … repo is private" | No read access yet: add `GITHUB_TOKEN` (3.2 "GitHub access") |
 | "… is not a member of the GeneGeniusinc organisation" | The user isn't an org member, or the App lacks Organization → Members: Read |
 | Webhooks show 401 in the App's "Recent deliveries" | `GITHUB_WEBHOOK_SECRET` differs from the App's webhook secret |
 | No pushes or CI on Activity | The App isn't installed on the repo, or lacks permissions; check Settings → status "GitHub App" |

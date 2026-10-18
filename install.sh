@@ -86,18 +86,20 @@ setkv SONAR_PUBLIC_URL "https://$DOMAIN/sonar"
 fill SESSION_SECRET "$(openssl rand -hex 32)"
 fill SONAR_DB_PASSWORD "$(openssl rand -hex 24)"
 fill GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 32)"
-for k in GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS; do
+fill PORTAL_PASSWORD "$(openssl rand -hex 10)"                   # login without the GitHub App: sees everything
+fill ADMIN_PASSWORD "$(openssl rand -hex 10)"                    # ... and can change Settings
+for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS; do
   if [ -n "${!k:-}" ]; then setkv "$k" "${!k}"; fi
 done
 chmod 600 .env
 
-say "GitHub App private key"
+say "GitHub App private key (optional)"
 mkdir -p secrets
 if [ -n "${APP_KEY:-}" ]; then $SUDO cp "${APP_KEY/#\~/$HOME}" secrets/github-app.pem; fi
 # The container runs as uid 1000; give it the key (and nobody else).
 $SUDO chown -R 1000:1000 secrets && $SUDO chmod 700 secrets
 $SUDO test -f secrets/github-app.pem && $SUDO chmod 600 secrets/github-app.pem && echo "secrets/github-app.pem in place" \
-  || echo "secrets/github-app.pem missing (GitHub sync and login stay off until you add it)"
+  || echo "no GitHub App key (fine: the App is optional)"
 
 say "Starting (the first build takes a few minutes)"
 $DOCKER compose --profile https up -d --build
@@ -115,22 +117,33 @@ else
   echo "(Let's Encrypt must reach port 80), then: $DOCKER compose logs caddy"
 fi
 
-missing=()
-for k in GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS; do [ -n "$(getkv "$k")" ] || missing+=("$k in .env"); done
-$SUDO test -f secrets/github-app.pem || missing+=("secrets/github-app.pem")
+app_ready=""
+if [ -n "$(getkv GITHUB_APP_ID)" ] && $SUDO test -f secrets/github-app.pem; then app_ready=1; fi
 
 cat <<EOF
 
 Portal     https://$DOMAIN
+           viewer password  $(getkv PORTAL_PASSWORD)
+           admin password   $(getkv ADMIN_PASSWORD)   (can change Settings: LLM key, Sonar token)
 SonarQube  https://$DOMAIN/sonar   (first login admin / admin, then change it)
+EOF
+if [ -z "$(getkv GITHUB_TOKEN)" ] && [ -z "$app_ready" ]; then
+  cat <<EOF
 
-GitHub App settings (github.com/organizations/GeneGeniusinc/settings/apps):
+Needed: read access to the two private repos, or the portal has no code to show.
+  Create a read-only token (README "GitHub access"), then:
+  GITHUB_TOKEN=<token> bash install.sh $IP
+EOF
+fi
+if [ -z "$app_ready" ]; then
+  cat <<EOF
+
+Optional, the GitHub App (Sign in with GitHub, instant webhooks, reviews posted on PRs).
+Create it at github.com/organizations/GeneGeniusinc/settings/apps with:
   Homepage URL    https://$DOMAIN
   Callback URL    https://$DOMAIN/auth/callback
   Webhook URL     https://$DOMAIN/webhook/github
   Webhook secret  $(getkv GITHUB_WEBHOOK_SECRET)
+then re-run with GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, ADMINS and APP_KEY (see the top of this file).
 EOF
-if [ ${#missing[@]} -gt 0 ]; then
-  printf '\nStill needed, then re-run "bash install.sh %s":\n' "$IP"
-  printf '  - %s\n' "${missing[@]}"
 fi

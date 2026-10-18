@@ -5,6 +5,7 @@ import os
 import tempfile
 
 os.environ["DATA_DIR"] = tempfile.mkdtemp()  # before importing portal, so the DB lands in a scratch dir
+os.environ.update(PORTAL_PASSWORD="viewer-pw", ADMIN_PASSWORD="admin-pw", DISABLE_WORKER="1")
 
 from portal import db  # noqa: E402
 from portal.chat import tool_sql  # noqa: E402
@@ -106,3 +107,20 @@ def test_people_and_readonly_sql():
     assert "Only one SELECT" in tool_sql("SELECT 1; DELETE FROM identities")
     assert "SQL error" in tool_sql("WITH x AS (SELECT 1) DELETE FROM identities")  # read-only connection refuses
     assert db.q("SELECT COUNT(*) n FROM identities")[0]["n"] == 1
+
+
+def test_password_login_without_github():
+    from fastapi.testclient import TestClient
+    from portal.main import app
+    with TestClient(app) as viewer, TestClient(app) as admin:
+        assert viewer.get("/api/summary").status_code == 401
+        assert "Portal password" in viewer.get("/auth/login").text
+        assert viewer.post("/auth/password", data={"password": "nope", "next": "/"}).status_code == 401
+        r = viewer.post("/auth/password", data={"password": "viewer-pw", "next": "/activity"}, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/activity"
+        assert viewer.get("/api/me").json() == {"login": "team", "admin": False}
+        assert viewer.get("/api/summary").json()["github"] is None
+        assert viewer.put("/api/settings", json={"llm_kind": "openai"}).status_code == 403
+        admin.post("/auth/password", data={"password": "admin-pw", "next": "//evil.example"}, follow_redirects=False)
+        assert admin.get("/api/me").json() == {"login": "admin", "admin": True}
+        assert admin.put("/api/settings", json={"llm_kind": "openai"}).status_code == 200

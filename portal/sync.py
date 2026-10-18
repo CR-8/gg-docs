@@ -69,7 +69,9 @@ def fetch(repo):
     url = GIT_URL.format(repo=repo, name=repo.split("/")[1])
     r = subprocess.run(["git", *gh.git_auth(), "clone", "--quiet", url, str(d)], capture_output=True, text=True)
     if r.returncode:
-        raise RuntimeError(f"git clone {repo}: {r.stderr.strip()[-500:]}")
+        hint = "" if gh.enabled else (" | The repo is private: set GITHUB_TOKEN (a read-only token) or the GitHub App "
+                                      "in .env, then re-run install.sh")
+        raise RuntimeError(f"git clone {repo}: {r.stderr.strip()[-500:]}{hint}")
 
 
 def default_branch(repo):
@@ -257,11 +259,13 @@ def sync(repo):
     fetch(repo)
     n = ingest_commits(repo)
     if gh.enabled:
-        learn_identities(repo)
-        ingest_push_events(repo)
-        ingest_checks(repo)
-        if llm.configured():
-            poll_prs(repo)
+        # Each API step is optional: a token without, say, Checks access must not stop the views rebuilding.
+        steps = [learn_identities, ingest_push_events, ingest_checks] + ([poll_prs] if llm.configured() else [])
+        for step in steps:
+            try:
+                step(repo)
+            except Exception as e:
+                log(step.__name__, f"{repo}: skipped, {e!r}"[:500], False)
     check_head(repo)
     log("sync", f"{repo}: {n} new commits")
 

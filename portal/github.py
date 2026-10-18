@@ -43,11 +43,15 @@ class GitHub:
         return bool(self.static or (self.app_id and self.key))
 
     @property
+    def mode(self):
+        return "app" if self.app_id and self.key else "token" if self.static else None
+
+    @property
     def oauth_enabled(self):
         return bool(self.client_id and self.client_secret)
 
     def token(self):
-        if self.static:
+        if self.mode == "token":  # the App wins when both are set
             return self.static
         if time.time() < self._expires - 120:
             return self._token
