@@ -293,7 +293,44 @@ Then, on the app's page:
 
 "Pull requests: write" is only used to post reviews, and only when an admin turns that on.
 
-### 3.2 Install on a cloud VM (step by step)
+### 3.2 Install on a cloud VM: one command
+
+On a fresh Ubuntu or Debian VM (2 vCPU, 8 GB RAM, 40 GB disk), with TCP **80 and 443 open to everyone** in the cloud firewall:
+
+```bash
+git clone https://github.com/CR-8/gg-docs.git ~/gg-portal && cd ~/gg-portal
+bash install.sh <vm-public-ip>          # e.g. bash install.sh 35.253.245.77
+```
+
+`install.sh` does everything, and is safe to re-run:
+
+1. Installs Docker and the Compose plugin when they're missing.
+2. Sets the kernel option SonarQube needs.
+3. Pulls the latest code.
+4. Writes `.env`:
+   - `PUBLIC_URL`, `DOMAIN` and `SONAR_PUBLIC_URL` use **`<ip-with-dashes>.sslip.io`** (e.g. `35-253-245-77.sslip.io`), a free DNS name that points at your IP, so Caddy can get a real HTTPS certificate without you owning a domain.
+   - Ports 7000/7010 are bound to localhost.
+   - `SESSION_SECRET`, `SONAR_DB_PASSWORD` and `GITHUB_WEBHOOK_SECRET` are generated once and kept on later runs.
+5. Hands the GitHub App key to the container.
+6. Starts the stack with HTTPS and waits until it answers.
+7. Prints the exact **Callback URL, Webhook URL and webhook secret** to enter in the GitHub App, plus anything still missing.
+
+Then:
+
+1. Create the GitHub App (3.1) with the URLs the script printed.
+2. Copy its private key to the VM: `scp <key>.pem <user>@<vm-ip>:~/gg-portal/app.pem`
+3. Re-run with the App's values:
+   ```bash
+   GITHUB_APP_ID=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... ADMINS=<your-github-login> \
+   APP_KEY=~/gg-portal/app.pem bash install.sh <vm-public-ip>
+   rm ~/gg-portal/app.pem      # the script copied it into secrets/
+   ```
+
+Keep the VM's public IP **static** (an Elastic IP on AWS, or "reserve static address" on GCP). If it changes, the sslip.io name changes with it; re-run the script and update the App's URLs. To use a real domain instead, point it at the VM and run `DOMAIN=portal.genegenius.ai bash install.sh <ip>`.
+
+The manual steps below do the same thing by hand.
+
+### 3.2.0 Install on a cloud VM (manual steps)
 
 Works on any Linux VM; the commands below are for **Ubuntu 24.04 LTS**. Size: **2 vCPU, 8 GB RAM, 40 GB disk** (SonarQube + Postgres use 2-3 GB of RAM; the backend venv for the route export takes about 3 GB of disk). For example, AWS EC2 `t3.large` with a 40 GB gp3 volume, GCP `e2-standard-2`, or Azure `B2ms`.
 
@@ -430,7 +467,7 @@ docker compose up -d --build
 
 Open `http://<vm-ip>:7000` (portal) and `http://<vm-ip>:7010/sonar` (SonarQube). Updates: `git pull && docker compose up -d --build`.
 
-**Adding HTTPS later without buying a domain:** the free wildcard DNS service sslip.io maps `<ip-with-dashes>.sslip.io` to your IP. For example, `203-0-113-5.sslip.io` resolves to `203.0.113.5`, so Caddy can get a real certificate for it. To switch:
+**Adding HTTPS later without buying a domain** (this is what `install.sh` sets up): the free wildcard DNS service sslip.io maps `<ip-with-dashes>.sslip.io` to your IP. For example, `203-0-113-5.sslip.io` resolves to `203.0.113.5`, so Caddy can get a real certificate for it. To switch:
 1. Set `DOMAIN=203-0-113-5.sslip.io` and `PUBLIC_URL=https://203-0-113-5.sslip.io` (and `SONAR_PUBLIC_URL=.../sonar`), plus `BIND_ADDR=127.0.0.1`.
 2. Open 80/443 and close 7000/7010.
 3. Update the three GitHub App URLs.
