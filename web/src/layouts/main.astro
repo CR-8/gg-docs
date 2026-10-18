@@ -1,0 +1,95 @@
+---
+// The one page shell: every page, including the generated views and sign-in, renders through this.
+import "@/styles/global.css"
+import { HeaderMenu } from "@/components/HeaderMenu"
+
+interface Props {
+  title: string
+  description?: string
+  bare?: boolean // sign-in: no top bar
+}
+const { title, description, bare = false } = Astro.props
+const NAV = [
+  ["/", "Overview"],
+  ["/docs/", "Docs"],
+  ["/activity/", "Activity"],
+  ["/people/", "People"],
+  ["/reviews/", "Reviews"],
+  ["/chat/", "Ask"],
+  ["/settings/", "Settings"],
+]
+const path = Astro.url.pathname
+const isOn = (href: string) =>
+  href === "/" ? path === "/" || path.startsWith("/views/") : path.startsWith(href)
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title} · GeneGenius</title>
+    <script is:inline>
+      // before first paint, so there is no flash: the saved choice, else the OS setting
+      try {
+        const t = localStorage.getItem("theme")
+        document.documentElement.classList.toggle(
+          "dark",
+          t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches
+        )
+      } catch {}
+    </script>
+  </head>
+  <body class="flex min-h-svh flex-col antialiased">
+    {
+      !bare && (
+        <header class="bg-background/80 sticky top-0 z-40 border-b backdrop-blur-md">
+          <div class="mx-auto flex h-14 w-full max-w-7xl items-center gap-4 px-4 sm:px-6">
+            <a href="/" class="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
+              <span class="bg-brand text-brand-foreground grid size-7 place-items-center rounded-lg font-mono text-xs font-bold">
+                gg
+              </span>
+              <span class="hidden sm:inline">GeneGenius</span>
+            </a>
+            <nav class="-mx-1 flex min-w-0 gap-0.5 overflow-x-auto px-1">
+              {NAV.map(([href, name]) => (
+                <a
+                  href={href}
+                  aria-current={isOn(href) ? "page" : undefined}
+                  class:list={[
+                    "rounded-md px-2.5 py-1.5 text-sm font-medium whitespace-nowrap transition-colors",
+                    isOn(href)
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:text-foreground hover:bg-muted/60",
+                  ]}
+                >
+                  {name}
+                </a>
+              ))}
+            </nav>
+            <HeaderMenu client:only="react" />
+          </div>
+        </header>
+      )
+    }
+    <main
+      class:list={[
+        "mx-auto w-full max-w-7xl flex-1 px-4 sm:px-6",
+        bare ? "grid place-items-center py-10" : "py-8",
+      ]}
+    >
+      {
+        !bare && (
+          <div class="mb-6">
+            <h1 class="text-2xl font-semibold tracking-tight">{title}</h1>
+            {description && (
+              <p class="text-muted-foreground mt-1 max-w-3xl text-sm text-pretty">{description}</p>
+            )}
+          </div>
+        )
+      }
+      <slot />
+    </main>
+  </body>
+</html>

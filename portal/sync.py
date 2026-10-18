@@ -84,7 +84,7 @@ def default_branch(repo):
 
 
 def checkout_defaults():
-    for repo in REPOS:
+    for repo in (BACKEND_REPO, FRONTEND_REPO):  # the two the views are built from
         branch = default_branch(repo)
         git(repo, "checkout", "--quiet", "--force", "-B", branch, f"origin/{branch}")
 
@@ -246,13 +246,28 @@ def check_head(repo):
         enqueue("review_push", repo, branch, seen, head)
 
 
+def save_pulls(repo, prs):
+    rows = [(repo, p["number"], p["title"], p["user"]["login"], "merged" if p.get("merged_at") else p["state"],
+             int(bool(p.get("draft"))), p["base"]["ref"], p["head"]["ref"], p["head"]["sha"], p["created_at"],
+             p["updated_at"], p.get("merged_at"), p["html_url"]) for p in prs]
+    db.xs("INSERT INTO pulls VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET "
+          "title=excluded.title, state=excluded.state, draft=excluded.draft, base=excluded.base, head=excluded.head, "
+          "head_sha=excluded.head_sha, updated_at=excluded.updated_at, merged_at=excluded.merged_at "
+          "WHERE excluded.updated_at >= pulls.updated_at", rows)
+
+
+def ingest_pulls(repo):
+    """Every open PR plus the 50 most recently closed, for Ask, the MCP server and poll_prs."""
+    save_pulls(repo, gh.paginate(f"/repos/{repo}/pulls", limit=100, state="open")
+               + gh.paginate(f"/repos/{repo}/pulls", limit=50, state="closed", sort="updated", direction="desc"))
+
+
 def poll_prs(repo):
     """Webhooks normally start PR reviews; this catches open PRs whose events never arrived
     (e.g. the portal's port is firewalled to office IPs)."""
-    for pr in gh.paginate(f"/repos/{repo}/pulls", limit=100, state="open"):
-        if not pr["draft"] and not db.q("SELECT 1 FROM reviews WHERE repo=? AND pr=? AND head_sha=?",
-                                         repo, pr["number"], pr["head"]["sha"]):
-            enqueue("review_pr", repo, pr["number"])
+    for pr in db.q("SELECT number FROM pulls p WHERE repo=? AND state='open' AND draft=0 AND NOT EXISTS "
+                   "(SELECT 1 FROM reviews r WHERE r.repo=p.repo AND r.pr=p.number AND r.head_sha=p.head_sha)", repo):
+        enqueue("review_pr", repo, pr["number"])
 
 
 def sync(repo):
@@ -260,13 +275,15 @@ def sync(repo):
     n = ingest_commits(repo)
     if gh.enabled:
         # Each API step is optional: a token without, say, Checks access must not stop the views rebuilding.
-        steps = [learn_identities, ingest_push_events, ingest_checks] + ([poll_prs] if llm.configured() else [])
+        steps = [learn_identities, ingest_push_events, ingest_checks, ingest_pulls] + ([poll_prs] if llm.configured() else [])
         for step in steps:
             try:
                 step(repo)
             except Exception as e:
                 log(step.__name__, f"{repo}: skipped, {e!r}"[:500], False)
     check_head(repo)
+    from . import docgen  # docgen imports this module
+    docgen.enqueue(repo)  # cheap when nothing changed: it compares fingerprints
     log("sync", f"{repo}: {n} new commits")
 
 
@@ -343,7 +360,7 @@ def sonar_token():
 
 def sonar():
     token = sonar_token()
-    heads = {r: git(r, "rev-parse", f"origin/{default_branch(r)}").strip() for r in REPOS}
+    heads = {r: git(r, "rev-parse", f"origin/{default_branch(r)}").strip() for r in SONAR_KEYS}
     if not token or heads == db.setting("sonar_heads") or time.time() - db.setting("sonar_at", 0) < 900:
         return  # no token, nothing new, or scanned in the last 15 min (the poller retries)
     checkout_defaults()
@@ -382,8 +399,10 @@ def handle_webhook(event, payload):
                              for c in payload.get("commits", []) if c.get("author")])
         pusher = (payload.get("sender") or {}).get("login") or (payload.get("pusher") or {}).get("name")
         enqueue("push", repo, payload["ref"][11:], payload["before"], payload["after"], pusher, now(), bool(payload.get("forced")))
-    elif event == "pull_request" and payload.get("action") in ("opened", "synchronize", "reopened", "ready_for_review"):
-        if not payload["pull_request"].get("draft"):
+    elif event == "pull_request" and payload.get("pull_request"):
+        save_pulls(repo, [payload["pull_request"]])  # every action: opened, edited, closed, merged, ...
+        if payload.get("action") in ("opened", "synchronize", "reopened", "ready_for_review") \
+                and not payload["pull_request"].get("draft"):
             enqueue("review_pr", repo, payload["number"])
     elif event in ("check_run", "check_suite") and payload.get("action") == "completed":
         enqueue("checks", repo)
@@ -425,6 +444,10 @@ def poller():
 
 
 def start():
+    from . import docgen
+    if not (SITE / "overview.json").exists() and all((repo_dir(r) / ".git").exists() for r in SONAR_KEYS):
+        enqueue("rebuild")  # views built before the Overview page read overview.json
+    docgen.start()
     for target in (worker, poller):
         threading.Thread(target=target, daemon=True, name=target.__name__).start()
 

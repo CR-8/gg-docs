@@ -3,13 +3,13 @@
     python build.py                  # graphs routes deps index
     python build.py graphs deps      # only some: graphs routes deps sonar index
 
-Writes the static views plus ARCHITECTURE.md (the same content as Markdown). Inside the portal
+Writes the views (graphify, Redoc and dependency-cruiser pages, import maps as Mermaid, the graph reports),
+overview.json for the portal's Overview page, and ARCHITECTURE.md (the same content as Markdown). Inside the portal
 container the worker runs this after every push to a default branch; tests are left to CI.
 Env: BACKEND_DIR / FRONTEND_DIR (repo checkouts), SITE_DIR, WORK_DIR, BACKEND_PYTHON (an interpreter
 with the backend's requirements, for the OpenAPI export), SONAR_HOST_URL + SONAR_TOKEN (sonar step).
 """
 import ast
-import html
 import json
 import os
 import shutil
@@ -72,7 +72,6 @@ def step_graphs():
         for f in ("graph.html", "tree.html", "callflow.html", "GRAPH_REPORT.md"):
             if (g / f).exists():
                 shutil.copy2(g / f, SITE / side / f)
-        md_page(SITE / side / "report.html", f"{side.title()} graph report", "GRAPH_REPORT.md")
 
 
 # ---------- routes: FastAPI OpenAPI + Next.js app router ----------
@@ -183,9 +182,8 @@ def to_mermaid(edges):
 
 def step_deps():
     mm = to_mermaid(backend_imports())
-    (WORK / "backend-imports.mmd").write_text(mm, encoding="utf-8")  # reused by ARCHITECTURE.md
-    mermaid_page(SITE / "backend" / "deps.html", "Backend package imports", mm,
-                 "Arrow labels = number of imported names. Folders under app/, two levels deep.")
+    for f in (WORK / "backend-imports.mmd", SITE / "backend" / "deps.mmd"):  # ARCHITECTURE.md, Import map view
+        f.write_text(mm, encoding="utf-8")
     if not DEPCRUISE.exists():
         run([NPM, "ci", "--prefix", ROOT, "--no-audit", "--no-fund"])
     res = WORK / "frontend-deps.json"
@@ -201,9 +199,8 @@ def step_deps():
             if d["resolved"].startswith("src/") and (a := fe_folder(m["source"][4:])) != (b := fe_folder(d["resolved"][4:])):
                 edges[a, b] += 1
     mm = to_mermaid(edges)
-    (WORK / "frontend-imports.mmd").write_text(mm, encoding="utf-8")
-    mermaid_page(SITE / "frontend" / "deps.html", "Frontend folder imports", mm,
-                 "Arrow labels = number of imports. One box per app/ route folder, otherwise per top-level src/ folder.")
+    for f in (WORK / "frontend-imports.mmd", SITE / "frontend" / "deps.mmd"):
+        f.write_text(mm, encoding="utf-8")
 
 
 # ---------- sonar: push both repos into SonarQube (needs sonar-scanner on PATH) ----------
@@ -226,127 +223,32 @@ def step_sonar():
              f"-Dsonar.working.directory={WORK / ('scanner-' + key)}", *props])
 
 
-# ---------- pages ----------
-
-CSS = (ROOT / "portal" / "pages" / "style.css").read_text(encoding="utf-8")  # one stylesheet for views and pages
-
-NAV = [("/", "Overview"), ("/activity", "Activity"), ("/people", "People"), ("/reviews", "Reviews"),
-       ("/chat", "Ask"), ("/settings", "Settings")]
-
-
-FAVICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' "
-           "height='32' rx='8' fill='%235bbfa8'/%3E%3Ctext x='16' y='21' font-family='monospace' font-weight='700' "
-           "font-size='14' text-anchor='middle' fill='%2306211b'%3Egg%3C/text%3E%3C/svg%3E")
-# Same top bar as the portal pages; who is signed in fills in when the portal serves the page.
-ME_JS = """<script>fetch("/api/me").then(r => r.ok ? r.json() : null).then(m => {
-  if (m) document.querySelector("nav .me").innerHTML =
-    (m.login + (m.admin ? " \\u00b7 admin" : "")).replace(/[&<>]/g, "") + ' &middot; <a href="/auth/logout">Sign out</a>';
-}).catch(() => {});</script>"""
-
-
-def page(title, body, active="/"):
-    links = "".join(f'<a href="{href}"{" class=on" if href == active else ""}>{name}</a>' for href, name in NAV)
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>'
-            f'<link rel="icon" href="{FAVICON}"><style>{CSS}</style></head><body>'
-            f'<nav><a class="brand" href="/"><span class="mark">gg</span>GeneGenius</a><div class="links">{links}</div>'
-            f'<span class="me"></span></nav><h1>{html.escape(title)}</h1>{body}{ME_JS}</body></html>')
-
-
-def mermaid_page(path, title, text, note=""):
-    # Diagrams come out thousands of px wide: fit to the box, then wheel-zoom / drag-pan.
-    body = (f'<p class="lede">{html.escape(note)} Scroll to zoom, drag to pan.</p>'
-            f'<div class="wide zoom"><pre class="mermaid">{html.escape(text)}</pre></div>'
-            f'<script src="{CDN}/svg-pan-zoom@3.6.2/dist/svg-pan-zoom.min.js"></script>'
-            f'<script type="module">import mermaid from "{CDN}/mermaid@12.1.0/dist/mermaid.esm.min.mjs";'
-            f'mermaid.initialize({{startOnLoad:false,maxEdges:20000,maxTextSize:10000000,'
-            f'theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default",flowchart:{{useMaxWidth:false}}}});'
-            f'await mermaid.run();const svg=document.querySelector(".mermaid svg");'
-            f'svg.removeAttribute("width");svg.removeAttribute("height");svg.style.cssText="width:100%;height:100%;max-width:none";'
-            f'svgPanZoom(svg,{{controlIconsEnabled:true,fit:true,center:true,minZoom:0.05,maxZoom:40,zoomScaleSensitivity:0.3}});</script>')
-    path.write_text(page(title, body), encoding="utf-8")
-
-
-def md_page(path, title, md_file):
-    body = (f'<div id="md" class="muted">Loading...</div><script type="module">'
-            f'import {{marked}} from "{CDN}/marked@18.0.14/lib/marked.esm.js";'
-            f'const el=document.getElementById("md");el.className="";'
-            f'el.innerHTML=marked.parse(await (await fetch("{md_file}")).text());</script>')
-    path.write_text(page(title, body), encoding="utf-8")
-
+# ---------- overview.json: what the portal's Overview page (web/src/components/Overview.tsx) shows ----------
 
 def git_ref(repo):
     out = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True).stdout.strip()
     return f"{out('rev-parse', '--abbrev-ref', 'HEAD')} @ {out('rev-parse', '--short', 'HEAD')}"
 
 
-def side_stats(side, routes):
-    stats = [(str(routes), "routes")]
+def graph_size(side):
     gj = WORK / side / "graphify-out" / "graph.json"
-    if gj.exists():
-        g = json.loads(gj.read_text(encoding="utf-8"))
-        stats.append((f"{len(g['nodes']):,}", f"symbols in {len({n.get('community') for n in g['nodes']})} modules"))
-    return ('<div class="stats">' + "".join(f'<div class="stat"><b>{v}</b><span class="muted">{k}</span></div>'
-                                            for v, k in stats)
-            + f'<div class="stat" data-ci="{side}"><b class="muted">&hellip;</b><span class="muted">CI on default branch</span></div></div>')
+    if not gj.exists():
+        return None, None
+    nodes = json.loads(gj.read_text(encoding="utf-8"))["nodes"]
+    return len(nodes), len({n.get("community") for n in nodes})
 
 
-def cards(side, items):
-    have = [(href, name, desc) for href, name, desc in items if (SITE / side / href).exists()]
-    return '<div class="grid">' + "".join(
-        f'<a class="card" href="{side}/{href}"><b>{name}</b><span>{desc}</span></a>' for href, name, desc in have) + "</div>"
-
-
-# Filled from the portal's /api/summary when served by it; a plain static server just leaves the placeholders.
-LIVE_JS = """<script>
-fetch("/api/summary").then(r => r.ok ? r.json() : null).then(s => {
-  if (!s) return;
-  for (const [side, ci] of Object.entries(s.ci || {})) {
-    const el = document.querySelector(`[data-ci="${side}"] b`);
-    if (!el) continue;
-    el.textContent = ci.total ? `${ci.passed}/${ci.total} passing` : "no checks yet";
-    el.className = ci.failed ? "bad" : ci.total ? "ok" : "muted";
-  }
-  const sonar = document.getElementById("sonar");
-  if (sonar && s.sonar_url) { sonar.href = s.sonar_url; sonar.hidden = false; }
-}).catch(() => {});
-</script>"""
-
-
-def build_index():
+def write_overview():
     b_routes, f_routes = backend_routes(), next_routes()
-    graph_cards = [("graph.html", "Module graph", "graphify communities, interactive"),
-                   ("tree.html", "Module tree", "every folder, file and symbol"),
-                   ("callflow.html", "Call flow", "call diagrams per area"),
-                   ("deps.html", "Import map", "which folder imports which")]
-    backend = cards("backend", graph_cards + [
-        ("api.html", "API reference", "every route, grouped by tag"),
-        ("report.html", "Graph report", "hubs, surprising links")])
-    frontend = cards("frontend", graph_cards + [
-        ("deps-violations.html", "Dependency rules", "circular, orphan, unresolvable imports"),
-        ("report.html", "Graph report", "hubs, surprising links")])
-
-    b_table = "".join(
-        f'<details><summary>{html.escape(tag)} <span class="muted">({len(rows)})</span></summary><table>'
-        + "".join(f"<tr><td><code>{m}</code></td><td><code>{html.escape(p)}</code></td>"
-                  f"<td class=muted>{html.escape(s)}</td></tr>" for m, p, s in sorted(rows, key=lambda r: r[1]))
-        + "</table></details>" for tag, rows in b_routes.items())
-    f_table = ("<details open><summary>Next.js app router "
-               f'<span class="muted">({len(f_routes)})</span></summary><table>'
-               + "".join(f"<tr><td><code>{html.escape(u)}</code></td><td>{k}</td><td class=muted><code>{html.escape(p)}</code></td></tr>"
-                         for u, k, p in f_routes) + "</table></details>")
-
-    body = f"""
-<p class="lede">Built {datetime.now():%Y-%m-%d %H:%M} &middot; backend {git_ref(BACKEND)} &middot; frontend {git_ref(FRONTEND)}
-&middot; <a href="ARCHITECTURE.md" download>Markdown version</a>
-&middot; <a id="sonar" href="#" hidden>SonarQube (bugs, smells, security)</a></p>
-<div class="cols">
-<section><h2>Backend <span class="tag">FastAPI</span></h2>{side_stats("backend", sum(map(len, b_routes.values())))}
-<h2>Views</h2>{backend}<h2>Routes</h2>{b_table or '<p class="muted">Run the routes step.</p>'}</section>
-<section><h2>Frontend <span class="tag">Next.js</span></h2>{side_stats("frontend", len(f_routes))}
-<h2>Views</h2>{frontend}<h2>Routes</h2>{f_table}</section>
-</div>{LIVE_JS}"""
-    (SITE / "index.html").write_text(page("GeneGenius architecture", body), encoding="utf-8")
+    dc = WORK / "frontend-deps.json"
+    out = {"built_at": datetime.now().astimezone().isoformat(timespec="seconds"), "sides": {}}
+    for side, repo, routes in (("backend", BACKEND, b_routes), ("frontend", FRONTEND, f_routes)):
+        symbols, modules = graph_size(side)
+        out["sides"][side] = {"ref": git_ref(repo), "symbols": symbols, "modules": modules,
+                              "files": sorted(p.name for p in (SITE / side).iterdir()), "routes": routes}
+    out["sides"]["frontend"]["violations"] = (
+        len(json.loads(dc.read_text(encoding="utf-8"))["summary"]["violations"]) if dc.exists() else None)
+    (SITE / "overview.json").write_text(json.dumps(out), encoding="utf-8")
 
 
 # ---------- ARCHITECTURE.md: the same content as one Markdown file ----------
@@ -411,7 +313,7 @@ def write_markdown():
 
 
 STEPS = {"graphs": step_graphs, "routes": step_routes, "deps": step_deps, "sonar": step_sonar,
-         "index": lambda: None}  # index.html and ARCHITECTURE.md are rebuilt after any step
+         "index": lambda: None}  # overview.json and ARCHITECTURE.md are rebuilt after any step
 DEFAULT = ["graphs", "routes", "deps"]
 
 if __name__ == "__main__":
@@ -426,6 +328,6 @@ if __name__ == "__main__":
             STEPS[n]()
         except Exception as e:  # keep going: the index links whatever did get built
             print(f"!!! {n} failed: {e!r}", flush=True)
-    build_index()
+    write_overview()
     write_markdown()
     print(f"\nviews written to {SITE}")

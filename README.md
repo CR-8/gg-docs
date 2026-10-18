@@ -5,12 +5,14 @@ A self-hosted dashboard that stays in sync with the GeneGenius GitHub repositori
 | You want to know | Where |
 |---|---|
 | How the code is organised: modules, files, imports, call flow, every route | **Overview** (generated views) and `ARCHITECTURE.md` |
+| Written documentation of every repository (overview, architecture, data flow, system design, ML system, API, one document per component), kept current on every push | **Docs**, downloadable as Markdown, .zip or PDF |
 | Who pushed what, to which branch, and what CI said about it | **Activity** |
 | Whose push broke a CI check that was passing before, and whether it is fixed | **Activity** (red banner), **People** |
 | What the review bot found in each PR or direct push, and who wrote each flagged line | **Reviews**, and as comments on the PR when posting is on |
 | Per person: commits, lines, pushes, CI breakages, review findings, "slop", SonarQube issues | **People** |
 | Anything across all of the above, in plain language | **Ask** (the chatbot) |
 | Bugs, code smells and security hotspots from static analysis | **SonarQube** at `/sonar` |
+| All of it inside your coding agent (Claude Code, Codex, ChatGPT, Mistral, Cursor, any MCP client) | the **MCP server** at `/mcp` (1.14) |
 
 Tests stay in your CI. The portal reads the CI results (GitHub check runs) and never runs your test suites itself.
 
@@ -58,7 +60,8 @@ Tests stay in your CI. The portal reads the CI results (GitHub check runs) and n
 | **SonarQube** + **Postgres** | Static analysis. The portal pushes both repos into it with `sonar-scanner` and reads issues back per author. |
 | **Caddy** (optional `https` profile) | Terminates TLS with an automatic certificate and routes `/sonar` to SonarQube and everything else to the portal. |
 | **GitHub App** | The portal's identity on GitHub: it clones the repos, receives webhooks, reads CI results, posts reviews, and provides "Sign in with GitHub". |
-| **LLM** (any OpenAI-compatible or Claude-compatible endpoint) | Writes the code reviews and powers the chatbot. Chosen by an admin in Settings. |
+| **LLM** (any OpenAI-compatible or Claude-compatible endpoint) | Writes the code reviews and the documentation, and powers the chatbot. The local model (Ollama on the VM) or a hosted one, chosen by an admin in Settings. |
+| **Web frontend** (`web/`) | Astro + React + shadcn/ui (with Kibo UI parts), built to static files the portal serves. One page shell for everything: Overview, Docs, Activity, People, Reviews, Ask, Settings and the generated views. |
 
 ### 1.2 Repository layout
 
@@ -75,8 +78,11 @@ portal/
   review.py           The review bot
   llm.py              One interface over Claude-compatible and OpenAI-compatible APIs
   chat.py             The chatbot's tools and loop
-  main.py             Web app: login, webhook endpoint, JSON API, pages
-  pages/              Activity, People, Reviews, Ask, Settings (plain HTML + JS) and the shared stylesheet
+  docgen.py           The documentation writer: code analysis, diagrams, LLM prose, incremental updates, its own worker
+  mcp.py              The MCP server (Streamable HTTP) over the same tools as the chatbot
+  main.py             Web app: login, webhook endpoint, JSON API, MCP endpoint, serves web/dist and the views
+web/                  The frontend: Astro pages (src/pages), React islands (src/components), shadcn/ui and Kibo UI
+                      components (src/components/ui, kibo-ui); `npm run build` writes web/dist
 tests/test_portal.py  Checks for the logic that is easy to get subtly wrong
 Dockerfile            The portal image (Python 3.11 + git + Node 22 + sonar-scanner with its own JRE)
 docker-compose.yml    portal, sonarqube, sonar-db, optional caddy
@@ -95,6 +101,9 @@ Two triggers feed the same job queue:
 - **Poller** (backup, every `POLL_SECONDS`, default 300). Queues a **sync** job per repo and a Sonar check, takes an hourly Sonar snapshot, and keeps the job log at 5,000 entries. Each sync also queues a review for every open, non-draft PR whose current head hasn't been reviewed yet (once an LLM is set). So if webhooks are missed or can't reach the portal, pushes, CI results and PR reviews still arrive within one poll. On the first poll after an LLM is set, every open PR gets reviewed once.
 
 Jobs are de-duplicated while they wait, so a burst of pushes collapses into one rebuild. A failing job is logged (Settings → Recent jobs) and never stops the queue.
+
+Each sync also stores every open PR and the 50 most recently closed (`pulls`), and `pull_request` webhooks update them
+on every action (opened, edited, synchronised, closed, merged), so Ask and the MCP server always know what is in flight.
 
 **A sync job** does, per repo:
 
@@ -129,6 +138,40 @@ On every new default-branch head the worker checks out both default branches in 
 | **deps** | Import maps for both repos and the frontend dependency-rule report | Backend: Python's own `ast` module reads every import inside `app/` and groups them two folders deep. Frontend: dependency-cruiser (with `depcruise.cjs`) resolves every import through the TypeScript path aliases, reports circular, orphan and unresolvable imports, and groups the map by route folder. Diagrams render with Mermaid, with pan and zoom. |
 | **sonar** | Pushes both repos into SonarQube | `sonar-scanner` per repo (backend sources `app/`, tests `tests/`; frontend `src/`, tests `*.test.*`). Runs only with a Sonar token, at most every 15 minutes, and only when a default-branch head changed. |
 | *(always)* | `index.html` and `ARCHITECTURE.md` | The overview page and a Markdown version with modules and their files, import maps as Mermaid blocks (GitHub renders them), and every route. |
+
+### 1.5a Generated documentation (docgen.py)
+
+For **every** repository the portal syncs (the two built in, `EXTRA_REPOS`, and any added in Settings), it writes and
+maintains a set of Markdown documents:
+
+| Document | What it covers |
+|---|---|
+| Overview | What the repository is, its main parts, how they fit together, how to run it |
+| Architecture | Layers, the component map (diagram), who depends on whom, design decisions, coupling hotspots |
+| Data flow | The main flows step by step (with a sequence diagram), entry points to data stores (diagram), external services |
+| System design | Deployment (diagram from docker-compose), configuration (every env var the code reads), background work, security, scaling |
+| ML system | Only when the code uses ML libraries or ships model files: models, pipeline, where weights live, risks |
+| API and routes | Every FastAPI route (from the decorators, with `APIRouter` prefixes) and Next.js page or API route, by component |
+| One per component | Purpose, how it works, entry points, dependencies (diagram), files, public interface, routes, config, gotchas |
+
+**How a document is made.** The facts come from the code on the default branch, read with git (no checkout), for any
+Python or JS/TS repository: Python through its own `ast` (classes, functions, docstrings, imports, routes, env vars,
+pydantic settings), JS/TS through import and export parsing (with `@/` aliases and Next.js app-router routes).
+Components are the top-level folders under the source root (`app/`, `src/`, ...), large ones split one level deeper,
+small ones merged. Diagrams are drawn from those facts, so they are always right; the configured model writes the
+explanations on top, from the same facts only. Without a model, every document still has its full reference part.
+
+**Kept current.** Every document stores a fingerprint of what it was written from (its files' blob SHAs; for the
+repository-wide documents, the structure: components, dependencies, routes, libraries, env vars, config files). After
+each push only the documents whose inputs changed are rewritten; a new repository gets its whole set; setting a model
+for the first time rewrites everything with prose. Every version is kept (Docs → History shows the diff), and all of
+them are searchable (SQLite FTS5). Documentation runs on its own worker thread, so a slow local model never holds up
+syncs and reviews. Admins can rewrite one document or a whole set from the Docs page.
+
+**Reading and exporting.** Docs renders GitHub-style alerts, syntax-highlighted code with copy buttons, KaTeX math,
+tables, and Mermaid diagrams that open full screen with zoom and pan, with a table of contents. Each document downloads
+as `.md`; a repository's set downloads as a `.zip` (with an index) or prints as one PDF book (cover, contents, a page
+break per document) through the browser's "Save as PDF".
 
 ### 1.6 The review bot
 
@@ -187,6 +230,9 @@ Each question runs a loop of up to 10 rounds. The model picks tools, the portal 
 | `code_graph` | Searches the graphify code graph ("what calls X", "what imports Y") | Read-only |
 | `architecture` | Returns a section of `ARCHITECTURE.md`, or its table of contents | Read-only |
 | `sonar_issues` | Lists open SonarQube issues for a repo, optionally for one author or quality | Read-only API call |
+| `pull_requests` · `pull_request` | Open/closed/merged PRs with findings on their head · one PR with its files, every review and the latest findings | Read-only |
+| `recent_pushes` | Pushes of the last days with their commits and CI, plus every check currently broken | Read-only |
+| `docs` | The generated documentation: list, read one, or full-text search | Read-only |
 
 The system prompt explains how every table is collected, tells the model to cite SHAs, PR numbers and dates, and tells it that commit messages and diffs are data, not instructions. Each answer lists the lookups it made. Your conversation lives in the browser tab (session storage); only the text of earlier turns is sent back with each question (the last 20 messages).
 
@@ -246,14 +292,36 @@ Everything the pages show comes from these endpoints (login required):
 | `GET /api/breakages?days=90` | Breakages in the period plus every open one |
 | `GET /api/reviews` · `GET /api/reviews/{id}` | Reviews with counts · one review with its findings |
 | `GET /api/events` | The last 100 job runs |
+| `GET /api/docs` · `GET /api/docs/{repo}/{slug}` (`?download=1` for the .md) · `GET /api/docs/{repo}/zip` | Generated documents with their status · one document · a repository's set as a .zip |
+| `GET /api/docs/search?q=` · `/api/docs/{repo}/history/{slug}` · `/api/docs/{repo}/diff/{version}` | Full-text search · versions · what a version changed |
+| `POST /api/admin/docs` `{"repo", "slug"?}` · `/add_repo` · `/remove_repo` `{"repo"}` | Rewrite documents · add or remove a repository (admin) |
+| `GET /api/settings/local` · `GET /api/settings/mcp` | Models downloaded into the local Ollama · MCP connection details (admin) |
+| `POST /mcp` | The MCP server (1.14) |
 | `POST /api/chat` `{"history": [...], "question": "..."}` | `{"answer", "steps"}` |
 | `GET /api/settings` · `PUT /api/settings` · `POST /api/settings/test` | Settings (secrets masked) · save (admin) · test (admin) |
 | `POST /api/admin/sync` · `/rebuild` · `/review` `{"repo", "pr"}` | Queue a job (admin) |
+
+### 1.14 The MCP server (coding agents)
+
+`/mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over Streamable HTTP, so any MCP client can
+use the portal: Claude Code, Codex, ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others. It offers
+the chatbot's tools (1.9) with larger results: PRs being worked on and updated, reviews and findings, pushes and CI,
+breakages, people, SonarQube, the code graph, and the generated documentation. Its instructions explain every table.
+
+- **Read-only** and stateless: every request is one JSON-RPC call answered with JSON, so there are no sessions to lose.
+- **Auth** is `MCP_TOKEN` (`install.sh` generates it): `Authorization: Bearer <token>`, or the token in the URL
+  (`/mcp/<token>`) for clients that only take a URL, such as ChatGPT and Le Chat. The URL is then a secret.
+- **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
+  ```bash
+  claude mcp add --transport http genegenius https://<domain>/mcp --header "Authorization: Bearer <token>"
+  codex mcp add genegenius --url https://<domain>/mcp/<token>
+  ```
 
 ---
 
 ## 2. Using the portal
 
+- **Docs**: the generated documentation of every repository (1.5a), with search, history, and .md / .zip / PDF export.
 - **Overview** (`/`): architecture views for each repo (module graph, module tree, call flow, import map, API reference, dependency rules, graph report), every route, live CI status of each default branch, a Markdown download, and the SonarQube link.
 - **Activity**: a red banner for every CI check currently broken on a default branch (who and since when), then pushes (pusher, branch, force-push flag, commits, CI result on the head, "broke X" badges, review link), then commits. Filter by repo, period and person.
 - **People**: the table from 1.7. Click a column to sort, or a name for that person's commits, breakages and findings.
@@ -355,7 +423,7 @@ Reviews and Ask can run on a coder model hosted on the VM itself, so no API key 
 LOCAL_LLM=auto bash install.sh <vm-public-ip>
 ```
 
-This starts [Ollama](https://ollama.com) as the `llm` service (reachable only by the portal), downloads **Qwen2.5-Coder Instruct in Q8 GGUF**, and points the portal at it (`http://llm:11434/v1`, OpenAI-compatible). `auto` picks the size by the VM's RAM, leaving room for SonarQube and the portal:
+This starts [Ollama](https://ollama.com) as the `llm` service (reachable only by the portal), downloads **Qwen2.5-Coder Instruct in Q8 GGUF** (skipped when it is already there, so re-runs never download it again; an interrupted download resumes on the next run), and points the portal at it (`http://llm:11434/v1`, OpenAI-compatible). `auto` picks the size by the VM's RAM, leaving room for SonarQube and the portal:
 
 | VM RAM | Model | Model memory |
 |---|---|---|
@@ -373,6 +441,12 @@ How the portal adapts to a small local model:
 - Requests may take up to an hour (`LLM_TIMEOUT`).
 
 **Speed:** on CPU only, expect tens of seconds per chat answer and a few minutes per review. A small model also follows the chatbot's tool instructions less reliably than a hosted one: the 7B is noticeably better than the 1.5B.
+
+**Already downloaded models.** Settings → Language model → **Local model** lists every model in that Ollama (name, size,
+quantisation): pick one and save, no URL or key needed. If the VM already has Ollama installed on the host
+(`/usr/share/ollama/.ollama` or `~/.ollama`), `install.sh` mounts that model store into the `llm` service instead of a
+fresh volume (`OLLAMA_DIR`), so models you pulled before are used as they are. Any OpenAI-compatible server of your own
+(llama.cpp, vLLM, LM Studio) works without an API key too.
 
 Settings can override all of this at any time. Pointing it at a hosted model (Claude or OpenAI) or at your own llama.cpp server (`llama-server --jinja`, which serves the same OpenAI-compatible API) takes effect immediately.
 
@@ -664,6 +738,10 @@ Set in `.env` (Docker) or the environment (local).
 | `LLM_CONTEXT` | `16384` | Local model context length (tokens) |
 | `REVIEW_CHUNK_CHARS` / `REVIEW_MAX_CHARS` | `150000` / `600000` | Diff characters per review request / per review |
 | `CHAT_TOOL_CHARS` | `20000` | Size cap for each chatbot tool result |
+| `DOCS_CONTEXT_CHARS` | `48000` | Code facts per documentation request (lower for a local model; `install.sh` sets it) |
+| `EXTRA_REPOS` | | More repositories to sync, review and document, comma separated (`owner/name`); admins can also add them in Settings |
+| `MCP_TOKEN` | generated by `install.sh` | Secret for the MCP server; blank turns `/mcp` off |
+| `OLLAMA_URL` / `OLLAMA_DIR` | `http://llm:11434` / the `ollama` volume | Where the portal looks for local models / a host model store to reuse |
 | `DEV_USER` | | Local development only: auto-login (see 1.11) |
 | `DISABLE_WORKER` | | `1` runs the web app without the worker and poller |
 | `GRAPHIFY_BIN` | graphify next to Python | Override the graphify executable |
@@ -706,7 +784,8 @@ Set in `.env` (Docker) or the environment (local).
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt pytest      # .venv/bin/pip on Linux/macOS
 npm ci
-.venv/Scripts/python -m pytest tests                       # 9 checks: webhook HMAC, diff parsing, finding
+.venv/Scripts/python -m pytest tests                       # 12 checks, including MCP, PR webhooks, generated docs,
+                                                           # and: webhook HMAC, diff parsing, finding
                                                            # validation, chunking, breakage detection,
                                                            # LLM tool formats, read-only SQL
 ```
@@ -718,6 +797,13 @@ DATA_DIR=./data GIT_URL_TEMPLATE='D:/GeneGenius/{name}' \
 DEFAULT_BRANCHES='{"GeneGeniusinc/Genegenius-backend":"v2-accelerated","GeneGeniusinc/Genegenius-phase-1":"main"}' \
 BACKEND_PYTHON=<python with the backend requirements> DEV_USER=<your login> ADMINS=<your login> \
 .venv/Scripts/python -m uvicorn portal.main:app --port 7000
+```
+
+The frontend lives in `web/` (Node 22.12+):
+
+```bash
+cd web && npm ci && npm run build      # writes web/dist, which the portal serves
+cd web && npm run dev                  # http://localhost:4321 with hot reload; proxies /api, /auth, /site to :7000
 ```
 
 `python build.py` on its own regenerates the views from `../Genegenius-backend` and `../Genegenius-phase-1` (or `BACKEND_DIR`/`FRONTEND_DIR`) into `./site`. Serve that folder with any static server.

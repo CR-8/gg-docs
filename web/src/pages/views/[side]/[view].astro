@@ -1,0 +1,14 @@
+---
+import Layout from "@/layouts/main.astro"
+import { ViewFrame } from "@/components/ViewFrame"
+import { SIDES, VIEWS, viewsFor, type Side, type View } from "@/lib/views"
+
+export function getStaticPaths() {
+  return (Object.keys(SIDES) as Side[]).flatMap((side) => viewsFor(side).map((view) => ({ params: { side, view } })))
+}
+const { side, view } = Astro.params as { side: Side; view: View }
+---
+
+<Layout title={`${SIDES[side].name} · ${VIEWS[view].name}`} description={VIEWS[view].desc}>
+  <ViewFrame client:only="react" side={side} view={view} />
+</Layout>

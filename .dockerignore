@@ -6,6 +6,10 @@ site/
 work/
 .venv/
 node_modules/
+web/node_modules/
+web/dist/
+web/.astro/
+.claude/
 __pycache__/
 .pytest_cache/
 tests/

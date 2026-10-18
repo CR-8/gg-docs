@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Login } from "@/components/Login"
+---
+
+<Layout title="Sign in" bare>
+  <Login client:only="react" />
+</Layout>
