@@ -23,6 +23,9 @@ from .github import gh, verify_signature
 from .review import SEVERITIES
 
 PAGES = ROOT / "portal" / "pages"
+FAVICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' "
+           "height='32' rx='8' fill='%235bbfa8'/%3E%3Ctext x='16' y='21' font-family='monospace' font-weight='700' "
+           "font-size='14' text-anchor='middle' fill='%2306211b'%3Egg%3C/text%3E%3C/svg%3E")
 PUBLIC = ("/auth/", "/webhook/github", "/healthz", "/static/style.css")
 DEV_USER = os.environ.get("DEV_USER", "")  # local development only: honoured for loopback requests
 # Shared passwords, for running without the GitHub App: admin can change Settings, team can see everything.
@@ -84,20 +87,22 @@ def safe_next(path):
 
 
 def login_page(nxt, error="", status_code=200):
-    github = (f'<p><a class="card" href="/auth/github?next={quote(nxt)}"><b>Sign in with GitHub</b>'
-              f'<span>{ORG} members</span></a></p>') if gh.oauth_enabled else ""
-    form = ('<form method="post" action="/auth/password" class="box">'
+    github = (f'<a class="card" href="/auth/github?next={quote(nxt)}" style="margin-bottom:12px"><b>Sign in with GitHub</b>'
+              f'<span>{ORG} members</span></a>') if gh.oauth_enabled else ""
+    form = ('<form method="post" action="/auth/password" class="panel">'
             f'<input type="hidden" name="next" value="{quote(nxt)}">'
-            '<label for="pw">Portal password</label>'
-            '<div class="row"><input id="pw" name="password" type="password" autofocus autocomplete="current-password">'
-            '<button class="primary">Sign in</button></div>'
+            '<label for="pw" style="margin-top:0">Password</label>'
+            '<div class="row" style="margin:0"><input id="pw" name="password" type="password" autofocus required '
+            'autocomplete="current-password" style="flex:1"><button class="primary">Sign in</button></div>'
             f'{f"<p class=error>{error}</p>" if error else ""}'
             '<p class="hint">The viewer password shows everything; the admin password can also change Settings.</p>'
             '</form>') if PASSWORDS else ""
     return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8">'
                         '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title>'
-                        '<link rel="stylesheet" href="/static/style.css"></head><body style="max-width:460px">'
-                        f'<h1>GeneGenius portal</h1>{github}{form}</body></html>', status_code=status_code)
+                        f'<link rel="icon" href="{FAVICON}"><link rel="stylesheet" href="/static/style.css"></head>'
+                        '<body><main class="login"><div class="brand-lg"><span class="mark">gg</span>GeneGenius</div>'
+                        '<h1>Engineering portal</h1><p class="lede">Architecture, activity, reviews and code quality '
+                        f'for the GeneGenius repositories.</p>{github}{form}</main></body></html>', status_code=status_code)
 
 
 @app.get("/auth/login")
@@ -309,8 +314,9 @@ async def ask(request: Request):
 def settings_view():
     cfg = llm.config()
     out = {k: cfg[k] for k in llm.DEFAULTS}
+    current = {"llm_api_key": cfg["llm_api_key"], "sonar_token": sync.sonar_token()}  # saved, or from .env
     for key in SECRETS:
-        value = db.setting(key, "")
+        value = current[key]
         out[key] = f"saved, ends in {value[-4:]}" if value else ""
     out["post_reviews"] = db.setting("post_reviews", False)
     return out
@@ -397,9 +403,12 @@ def index():
     problem = (f"<p class='error'>The last sync failed:</p><pre style='white-space:pre-wrap'>"
                f"{html.escape(failed[0]['detail'])}</pre>") if failed else ""
     return HTMLResponse("<!doctype html><html><head><meta charset='utf-8'><title>GeneGenius portal</title>"
-                        "<link rel='stylesheet' href='/static/style.css'></head><body><h1>GeneGenius portal</h1>"
-                        "<p>The first sync and build are running; this page fills in when they finish (a few minutes). "
-                        "<a href='/settings'>Settings</a> shows progress.</p>" + problem + "</body></html>")
+                        f"<link rel=\"icon\" href=\"{FAVICON}\"><link rel='stylesheet' href='/static/style.css'></head><body>"
+                        "<main class='login' style='max-width:640px'><div class='brand-lg'><span class='mark'>gg</span>GeneGenius</div>"
+                        "<h1>Getting things ready</h1><p class='lede'>The first sync and build are running. This page fills in "
+                        "when they finish, usually a few minutes. <a href='/settings'>Settings</a> shows progress, and "
+                        "<a href='/activity'>Activity</a> and <a href='/chat'>Ask</a> work already.</p>" + problem
+                        + "</main></body></html>")
 
 
 app.mount("/", StaticFiles(directory=SITE, html=True, check_dir=False), name="site")

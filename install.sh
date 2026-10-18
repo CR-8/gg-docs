@@ -8,6 +8,9 @@
 # Optional, to fill the GitHub App values in one go (otherwise edit .env later and re-run):
 #   GITHUB_APP_ID=123456 GITHUB_CLIENT_ID=Iv23li... GITHUB_CLIENT_SECRET=... ADMINS=your-login \
 #   APP_KEY=~/genegenius-reviewer.private-key.pem  bash install.sh 35.253.245.77
+# Run a coder model on this VM for reviews and the chatbot (Ollama, Qwen2.5-Coder Q8 sized to the RAM):
+#   LOCAL_LLM=auto bash install.sh 35.253.245.77        # or an Ollama tag, e.g. qwen2.5-coder:7b-instruct-q8_0
+#   LOCAL_LLM=off  bash install.sh 35.253.245.77        # switch it off again
 set -euo pipefail
 
 IP="${1:-${PUBLIC_IP:-}}"
@@ -91,6 +94,36 @@ fill ADMIN_PASSWORD "$(openssl rand -hex 10)"                    # ... and can c
 for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS; do
   if [ -n "${!k:-}" ]; then setkv "$k" "${!k}"; fi
 done
+
+# Local model: pick the biggest Qwen2.5-Coder Q8 that fits next to SonarQube (~3 GB) and the portal (~2 GB).
+LLM_TAG=""
+if [ "${LOCAL_LLM:-}" = "off" ]; then
+  setkv COMPOSE_PROFILES https
+  for k in LLM_KIND LLM_BASE_URL LLM_MODEL LLM_API_KEY LLM_TIMEOUT REVIEW_CHUNK_CHARS REVIEW_MAX_CHARS CHAT_TOOL_CHARS; do
+    setkv "$k" ""
+  done
+elif [ -n "${LOCAL_LLM:-}" ]; then
+  ram_gb=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 / 1024 ))
+  if [ "$LOCAL_LLM" != "auto" ]; then LLM_TAG="$LOCAL_LLM"
+  elif [ "$ram_gb" -ge 15 ]; then LLM_TAG="qwen2.5-coder:7b-instruct-q8_0"     # ~8 GB in RAM
+  elif [ "$ram_gb" -ge 10 ]; then LLM_TAG="qwen2.5-coder:3b-instruct-q8_0"     # ~3.5 GB
+  else LLM_TAG="qwen2.5-coder:1.5b-instruct-q8_0"                               # ~2 GB
+  fi
+  echo "Local model: $LLM_TAG (VM has ${ram_gb} GB RAM)"
+  ctx="${LLM_CONTEXT:-16384}"
+  setkv COMPOSE_PROFILES "https,llm"
+  setkv LLM_CONTEXT "$ctx"
+  setkv LLM_KIND openai
+  setkv LLM_BASE_URL "http://llm:11434/v1"
+  setkv LLM_MODEL "$LLM_TAG"
+  setkv LLM_API_KEY ollama                                         # Ollama ignores it; the client needs one
+  setkv LLM_EFFORT ""
+  setkv LLM_TIMEOUT 3600                                           # CPU inference is slow
+  setkv REVIEW_CHUNK_CHARS $(( (ctx - 4000) * 3 ))                 # leave room for instructions and the answer
+  setkv REVIEW_MAX_CHARS $(( (ctx - 4000) * 12 ))
+  setkv CHAT_TOOL_CHARS 6000
+fi
+fill COMPOSE_PROFILES https
 chmod 600 .env
 
 say "GitHub App private key (optional)"
@@ -102,7 +135,8 @@ $SUDO test -f secrets/github-app.pem && $SUDO chmod 600 secrets/github-app.pem &
   || echo "no GitHub App key (fine: the App is optional)"
 
 say "Starting (the first build takes a few minutes)"
-$DOCKER compose --profile https up -d --build
+$DOCKER compose up -d --build --remove-orphans     # COMPOSE_PROFILES in .env picks https / llm
+if [ "${LOCAL_LLM:-}" = "off" ]; then $DOCKER compose --profile llm rm -sf llm; fi
 
 say "Waiting for https://$DOMAIN"
 ok=""
@@ -115,6 +149,12 @@ if [ -n "$ok" ]; then
 else
   echo "Not reachable over HTTPS yet. Check that the VM firewall allows TCP 80 and 443 from anywhere"
   echo "(Let's Encrypt must reach port 80), then: $DOCKER compose logs caddy"
+fi
+
+if [ -n "$LLM_TAG" ]; then
+  say "Downloading $LLM_TAG (one time, a few GB)"
+  $DOCKER compose exec -T llm ollama pull "$LLM_TAG"
+  echo "Local model ready. CPU-only answers take a while: expect tens of seconds for chat, minutes per review."
 fi
 
 app_ready=""

@@ -114,7 +114,7 @@ def test_password_login_without_github():
     from portal.main import app
     with TestClient(app) as viewer, TestClient(app) as admin:
         assert viewer.get("/api/summary").status_code == 401
-        assert "Portal password" in viewer.get("/auth/login").text
+        assert 'name="password"' in viewer.get("/auth/login").text
         assert viewer.post("/auth/password", data={"password": "nope", "next": "/"}).status_code == 401
         r = viewer.post("/auth/password", data={"password": "viewer-pw", "next": "/activity"}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/activity"

@@ -11,10 +11,10 @@
   <button>Filter</button>
 </form>
 <div id="breaks"></div>
-<h2>Pushes</h2><div id="pushes" class="muted">Loading...</div>
+<h2>Pushes</h2><div id="pushes"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
 <h2>Commits</h2><div id="commits"></div>
 <script type="module">
-import {api, nav, h, when, short, repoName, commitLink, checkChips, table} from "/static/app.js";
+import {api, nav, h, when, short, repoName, commitLink, checkChips, table, empty} from "/static/app.js";
 nav("/activity");
 const form = document.getElementById("f");
 const params = new URLSearchParams(location.search);
@@ -29,13 +29,13 @@ async function load() {
   form.elements.repo.value = q.get("repo") || "";
 
   const open = breaks.filter(b => !b.fixed_sha);
-  document.getElementById("breaks").innerHTML = open.length ? `<div class="box"><b class="bad">${open.length} CI check${open.length > 1 ? "s" : ""} broken on a default branch</b>
+  document.getElementById("breaks").innerHTML = open.length ? `<div class="banner"><div><b class="bad">${open.length} CI check${open.length > 1 ? "s" : ""} broken on a default branch</b>
     <ul>${open.map(b => `<li><b>${h(b.check_name)}</b> in ${h(repoName(b.repo))}@${h(b.branch)} since ${commitLink(b.repo, b.broken_sha)}
-    by <a href="/people#${encodeURIComponent(b.person || "")}">${h(b.person || "unknown")}</a>${b.pusher && b.pusher !== b.person ? `, pushed by ${h(b.pusher)}` : ""} (${when(b.broken_at)})</li>`).join("")}</ul></div>` : "";
+    by <a href="/people#${encodeURIComponent(b.person || "")}">${h(b.person || "unknown")}</a>${b.pusher && b.pusher !== b.person ? `, pushed by ${h(b.pusher)}` : ""} (${when(b.broken_at)})</li>`).join("")}</ul></div></div>` : "";
 
   const pushes = document.getElementById("pushes");
   pushes.className = "";
-  if (!data.pushes.length) pushes.innerHTML = '<p class="muted">No pushes recorded in this period yet. They come from GitHub's API once GitHub access (a token or the GitHub App) is set; commits below come straight from git.</p>';
+  if (!data.pushes.length) pushes.innerHTML = empty("No pushes in this period yet", "Pushes come from GitHub's API once GitHub access (a token or the GitHub App) is set. The commits below come straight from git.");
   else table(pushes, data.pushes, [
     {k: "pushed_at", label: "When", fmt: r => when(r.pushed_at)},
     {k: "pusher", label: "Pusher", fmt: r => `<a href="/people#${encodeURIComponent(r.pusher || "")}">${h(r.pusher)}</a>`},

@@ -234,16 +234,28 @@ NAV = [("/", "Overview"), ("/activity", "Activity"), ("/people", "People"), ("/r
        ("/chat", "Ask"), ("/settings", "Settings")]
 
 
+FAVICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' "
+           "height='32' rx='8' fill='%235bbfa8'/%3E%3Ctext x='16' y='21' font-family='monospace' font-weight='700' "
+           "font-size='14' text-anchor='middle' fill='%2306211b'%3Egg%3C/text%3E%3C/svg%3E")
+# Same top bar as the portal pages; who is signed in fills in when the portal serves the page.
+ME_JS = """<script>fetch("/api/me").then(r => r.ok ? r.json() : null).then(m => {
+  if (m) document.querySelector("nav .me").innerHTML =
+    (m.login + (m.admin ? " \\u00b7 admin" : "")).replace(/[&<>]/g, "") + ' &middot; <a href="/auth/logout">Sign out</a>';
+}).catch(() => {});</script>"""
+
+
 def page(title, body, active="/"):
-    nav = "".join(f'<a href="{href}"{" class=on" if href == active else ""}>{name}</a>' for href, name in NAV)
+    links = "".join(f'<a href="{href}"{" class=on" if href == active else ""}>{name}</a>' for href, name in NAV)
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>'
-            f'<style>{CSS}</style></head><body><nav>{nav}</nav><h1>{html.escape(title)}</h1>{body}</body></html>')
+            f'<link rel="icon" href="{FAVICON}"><style>{CSS}</style></head><body>'
+            f'<nav><a class="brand" href="/"><span class="mark">gg</span>GeneGenius</a><div class="links">{links}</div>'
+            f'<span class="me"></span></nav><h1>{html.escape(title)}</h1>{body}{ME_JS}</body></html>')
 
 
 def mermaid_page(path, title, text, note=""):
     # Diagrams come out thousands of px wide: fit to the box, then wheel-zoom / drag-pan.
-    body = (f'<p class="muted">{html.escape(note)} Scroll to zoom, drag to pan.</p>'
+    body = (f'<p class="lede">{html.escape(note)} Scroll to zoom, drag to pan.</p>'
             f'<div class="wide zoom"><pre class="mermaid">{html.escape(text)}</pre></div>'
             f'<script src="{CDN}/svg-pan-zoom@3.6.2/dist/svg-pan-zoom.min.js"></script>'
             f'<script type="module">import mermaid from "{CDN}/mermaid@12.1.0/dist/mermaid.esm.min.mjs";'
@@ -325,13 +337,13 @@ def build_index():
                          for u, k, p in f_routes) + "</table></details>")
 
     body = f"""
-<p class="muted">Built {datetime.now():%Y-%m-%d %H:%M} &middot; backend {git_ref(BACKEND)} &middot; frontend {git_ref(FRONTEND)}
+<p class="lede">Built {datetime.now():%Y-%m-%d %H:%M} &middot; backend {git_ref(BACKEND)} &middot; frontend {git_ref(FRONTEND)}
 &middot; <a href="ARCHITECTURE.md" download>Markdown version</a>
 &middot; <a id="sonar" href="#" hidden>SonarQube (bugs, smells, security)</a></p>
 <div class="cols">
-<section><h2>Backend &middot; FastAPI</h2>{side_stats("backend", sum(map(len, b_routes.values())))}
+<section><h2>Backend <span class="tag">FastAPI</span></h2>{side_stats("backend", sum(map(len, b_routes.values())))}
 <h2>Views</h2>{backend}<h2>Routes</h2>{b_table or '<p class="muted">Run the routes step.</p>'}</section>
-<section><h2>Frontend &middot; Next.js</h2>{side_stats("frontend", len(f_routes))}
+<section><h2>Frontend <span class="tag">Next.js</span></h2>{side_stats("frontend", len(f_routes))}
 <h2>Views</h2>{frontend}<h2>Routes</h2>{f_table}</section>
 </div>{LIVE_JS}"""
     (SITE / "index.html").write_text(page("GeneGenius architecture", body), encoding="utf-8")

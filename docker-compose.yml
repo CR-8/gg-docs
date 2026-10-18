@@ -1,6 +1,7 @@
 # GeneGenius portal on :7000 and SonarQube on :7010/sonar.    docker compose up -d --build
-# With a domain: set DOMAIN and BIND_ADDR=127.0.0.1 in .env, then add --profile https
-# (Caddy serves https://DOMAIN and https://DOMAIN/sonar with an automatic certificate).
+# Optional parts are profiles, switched on with COMPOSE_PROFILES in .env (install.sh sets it):
+#   https - Caddy serves https://DOMAIN and https://DOMAIN/sonar with an automatic certificate
+#   llm   - a local coder model (Ollama) the portal uses for reviews and the chatbot
 name: gg-portal
 services:
   portal:
@@ -42,6 +43,18 @@ services:
     volumes: [sonar_db:/var/lib/postgresql/data]
     restart: unless-stopped
 
+  # Optional local model (profile "llm"): OpenAI-compatible API at http://llm:11434/v1, reachable only by the portal.
+  llm:
+    image: ollama/ollama:0.35.1
+    profiles: [llm]
+    environment:
+      OLLAMA_CONTEXT_LENGTH: ${LLM_CONTEXT:-16384}
+      OLLAMA_KEEP_ALIVE: 24h        # keep the model in RAM between requests
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes: [ollama:/root/.ollama]
+    restart: unless-stopped
+
   caddy:
     image: caddy:2.8-alpine
     profiles: [https]
@@ -61,3 +74,4 @@ volumes:
   sonar_logs:
   sonar_db:
   caddy_data:
+  ollama:

@@ -9,10 +9,10 @@ default branches. Each finding is blamed to the person who wrote that line.</p>
   <select name="repo"></select><input name="pr" placeholder="PR number" size="10" inputmode="numeric">
   <button>Review this PR now</button><span id="run-msg" class="muted"></span>
 </form>
-<div id="list" class="muted">Loading...</div>
+<div id="list"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
 <div id="detail"></div>
 <script type="module">
-import {api, nav, h, when, short, repoName, commitLink, prLink, table} from "/static/app.js";
+import {api, nav, h, when, short, repoName, commitLink, prLink, table, empty} from "/static/app.js";
 const me = await nav("/reviews");
 const SEV = {critical: "bad", major: "warn", minor: "", nit: "muted"};
 
@@ -20,7 +20,7 @@ async function load() {
   const rows = await api("/api/reviews");
   const el = document.getElementById("list");
   el.className = "";
-  if (!rows.length) { el.innerHTML = '<p class="muted">No reviews yet. They start once an LLM is set in Settings and a PR or push comes in.</p>'; return; }
+  if (!rows.length) { el.innerHTML = empty("No reviews yet", "Reviews start once an LLM is set in Settings and a PR or a push to a default branch comes in."); return; }
   table(el, rows, [
     {k: "created_at", label: "When", fmt: r => when(r.created_at)},
     {k: "repo", label: "What", fmt: r => `${h(repoName(r.repo))} ${r.pr ? prLink(r.repo, r.pr) : "@" + h(r.branch)} <a href="#r${r.id}">${h(r.title)}</a>`},
@@ -38,7 +38,7 @@ async function detail() {
   const el = document.getElementById("detail");
   el.innerHTML = `<h2>${h(repoName(r.repo))} ${r.pr ? prLink(r.repo, r.pr) : "@" + h(r.branch)}: ${h(r.title)}</h2>
     <p class="muted">${commitLink(r.repo, r.base_sha)}..${commitLink(r.repo, r.head_sha)} &middot; ${h(r.model)} &middot; ${when(r.created_at)}</p>
-    <div class="box"><p style="white-space:pre-wrap;margin:0">${h(r.summary)}</p></div><div id="findings"></div>`;
+    <div class="panel"><p style="white-space:pre-wrap;margin:0">${h(r.summary)}</p></div><div id="findings"></div>`;
   table(document.getElementById("findings"), r.findings, [
     {k: "severity", label: "Severity", fmt: f => `<span class="${SEV[f.severity]}">${h(f.severity)}</span>`},
     {k: "category", label: "Category"},
