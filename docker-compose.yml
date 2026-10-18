@@ -4,9 +4,7 @@
 name: gg-portal
 services:
   portal:
-    build:
-      context: .
-      network: host   # build steps use the VM's own network and DNS, which some clouds' Docker bridges don't pass through
+    build: .   # install.sh makes sure containers (and so build steps) can resolve names first
     env_file: .env
     environment:
       SONAR_URL: http://sonarqube:9000/sonar
