@@ -2,13 +2,15 @@
 
     uvicorn portal.main:app --host 0.0.0.0 --port 7000
 """
+import asyncio
+import html
 import json
 import os
 import secrets
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -21,8 +23,11 @@ from .github import gh, verify_signature
 from .review import SEVERITIES
 
 PAGES = ROOT / "portal" / "pages"
-PUBLIC = ("/auth/", "/webhook/github", "/healthz")
+PUBLIC = ("/auth/", "/webhook/github", "/healthz", "/static/style.css")
 DEV_USER = os.environ.get("DEV_USER", "")  # local development only: honoured for loopback requests
+# Shared passwords, for running without the GitHub App: admin can change Settings, team can see everything.
+PASSWORDS = {role: pw for role, pw in (("admin", os.environ.get("ADMIN_PASSWORD", "")),
+                                       ("team", os.environ.get("PORTAL_PASSWORD", ""))) if pw}
 SECRETS = ("llm_api_key", "sonar_token")
 WEIGHT = {"critical": 8, "major": 3, "minor": 1, "nit": 0.5}
 
@@ -38,8 +43,9 @@ app = FastAPI(title="GeneGenius portal", docs_url=None, redoc_url=None, openapi_
 
 
 def current_user(request):
-    # DEV_USER only works with GitHub login unconfigured and for requests from this machine.
-    if DEV_USER and not gh.oauth_enabled and request.client and request.client.host in ("127.0.0.1", "::1"):
+    # DEV_USER only works with no login method configured and for requests from this machine.
+    if (DEV_USER and not gh.oauth_enabled and not PASSWORDS
+            and request.client and request.client.host in ("127.0.0.1", "::1")):
         return {"login": DEV_USER, "admin": True}
     return request.session.get("user")
 
@@ -77,13 +83,53 @@ def safe_next(path):
     return path if path.startswith("/") and not path.startswith("//") else "/"
 
 
+def login_page(nxt, error="", status_code=200):
+    github = (f'<p><a class="card" href="/auth/github?next={quote(nxt)}"><b>Sign in with GitHub</b>'
+              f'<span>{ORG} members</span></a></p>') if gh.oauth_enabled else ""
+    form = ('<form method="post" action="/auth/password" class="box">'
+            f'<input type="hidden" name="next" value="{quote(nxt)}">'
+            '<label for="pw">Portal password</label>'
+            '<div class="row"><input id="pw" name="password" type="password" autofocus autocomplete="current-password">'
+            '<button class="primary">Sign in</button></div>'
+            f'{f"<p class=error>{error}</p>" if error else ""}'
+            '<p class="hint">The viewer password shows everything; the admin password can also change Settings.</p>'
+            '</form>') if PASSWORDS else ""
+    return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                        '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title>'
+                        '<link rel="stylesheet" href="/static/style.css"></head><body style="max-width:460px">'
+                        f'<h1>GeneGenius portal</h1>{github}{form}</body></html>', status_code=status_code)
+
+
 @app.get("/auth/login")
 def login(request: Request, next: str = "/"):
+    if not (gh.oauth_enabled or PASSWORDS):
+        return HTMLResponse("No login method is configured: set PORTAL_PASSWORD / ADMIN_PASSWORD, "
+                            "or the GitHub App's GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET.", status_code=503)
+    if gh.oauth_enabled and not PASSWORDS:
+        return github_login(request, next)
+    return login_page(safe_next(next))
+
+
+@app.get("/auth/github")
+def github_login(request: Request, next: str = "/"):
     if not gh.oauth_enabled:
-        return HTMLResponse("GitHub login is not configured (GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET).", status_code=503)
+        return RedirectResponse("/auth/login")
     state = secrets.token_urlsafe(24)
     request.session["oauth"] = {"state": state, "next": safe_next(next)}
     return RedirectResponse(gh.oauth_url(state, f"{PUBLIC_URL}/auth/callback"))
+
+
+@app.post("/auth/password")
+async def password_login(request: Request):
+    form = parse_qs((await request.body()).decode(), keep_blank_values=True)
+    given, nxt = form.get("password", [""])[0], safe_next(unquote(form.get("next", ["/"])[0]))
+    role = next((role for role, secret in PASSWORDS.items()
+                 if secrets.compare_digest(given.encode(), secret.encode())), None)
+    if not role:
+        await asyncio.sleep(1)  # slows down guessing
+        return login_page(nxt, "Wrong password.", 401)
+    request.session["user"] = {"login": role, "admin": role == "admin"}
+    return RedirectResponse(nxt, status_code=303)
 
 
 @app.get("/auth/callback")
@@ -140,7 +186,7 @@ def summary():
                     "failed": sum(r["conclusion"] in ("failure", "timed_out") for r in rows)}
     return {"ci": ci, "sonar_url": SONAR_PUBLIC_URL or None,
             "open_breakages": db.q("SELECT COUNT(*) n FROM breakages WHERE fixed_sha IS NULL")[0]["n"],
-            "worker": sync.status(), "github": gh.enabled, "llm": llm.configured()}
+            "worker": sync.status(), "github": gh.mode, "llm": llm.configured()}
 
 
 @app.get("/api/activity")
@@ -347,8 +393,13 @@ app.mount("/static", StaticFiles(directory=PAGES), name="static")
 def index():
     if (SITE / "index.html").exists():
         return FileResponse(SITE / "index.html")
-    return HTMLResponse("<p style='font-family:system-ui'>The first sync and build are running; "
-                        "this page fills in when they finish. <a href='/activity'>Activity</a> works already.</p>")
+    failed = db.q("SELECT detail FROM events WHERE kind='sync' AND ok=0 ORDER BY id DESC LIMIT 1")
+    problem = (f"<p class='error'>The last sync failed:</p><pre style='white-space:pre-wrap'>"
+               f"{html.escape(failed[0]['detail'])}</pre>") if failed else ""
+    return HTMLResponse("<!doctype html><html><head><meta charset='utf-8'><title>GeneGenius portal</title>"
+                        "<link rel='stylesheet' href='/static/style.css'></head><body><h1>GeneGenius portal</h1>"
+                        "<p>The first sync and build are running; this page fills in when they finish (a few minutes). "
+                        "<a href='/settings'>Settings</a> shows progress.</p>" + problem + "</body></html>")
 
 
 app.mount("/", StaticFiles(directory=SITE, html=True, check_dir=False), name="site")

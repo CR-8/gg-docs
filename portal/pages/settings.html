@@ -23,7 +23,7 @@
 
   <h2>Review bot</h2>
   <label style="font-weight:400"><input type="checkbox" name="post_reviews"> Post reviews on GitHub PRs (summary + inline comments, as the GitHub App)</label>
-  <p class="hint">Off: reviews are only stored here and used by the chatbot.</p>
+  <p class="hint">Off: reviews are only stored here and used by the chatbot. Posting needs the GitHub App, or a token that can write pull requests.</p>
 
   <h2>SonarQube</h2>
   <div class="field"><label for="sonar">Token</label><input id="sonar" name="sonar_token" type="password" autocomplete="off">
@@ -91,7 +91,7 @@ async function status() {
   const st = document.getElementById("status");
   st.className = "";
   st.innerHTML = `<div class="stats">
-    <div class="stat"><b class="${s.github ? "ok" : "bad"}">${s.github ? "connected" : "not set"}</b><span class="muted">GitHub App</span></div>
+    <div class="stat"><b class="${s.github ? "ok" : "bad"}">${{app: "GitHub App", token: "token"}[s.github] || "none"}</b><span class="muted">GitHub access</span></div>
     <div class="stat"><b class="${s.llm ? "ok" : "warn"}">${s.llm ? "configured" : "not set"}</b><span class="muted">LLM</span></div>
     <div class="stat"><b>${s.worker.queued}</b><span class="muted">jobs queued${s.worker.pending.length ? ": " + h(s.worker.pending.join(", ")) : ""}</span></div>
     <div class="stat"><b class="${s.open_breakages ? "bad" : "ok"}">${s.open_breakages}</b><span class="muted">open CI breakages</span></div></div>`;

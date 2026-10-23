@@ -35,7 +35,7 @@ async function load() {
 
   const pushes = document.getElementById("pushes");
   pushes.className = "";
-  if (!data.pushes.length) pushes.innerHTML = '<p class="muted">No pushes recorded in this period yet. They arrive from GitHub webhooks and the Events API once the GitHub App is connected.</p>';
+  if (!data.pushes.length) pushes.innerHTML = '<p class="muted">No pushes recorded in this period yet. They come from GitHub's API once GitHub access (a token or the GitHub App) is set; commits below come straight from git.</p>';
   else table(pushes, data.pushes, [
     {k: "pushed_at", label: "When", fmt: r => when(r.pushed_at)},
     {k: "pusher", label: "Pusher", fmt: r => `<a href="/people#${encodeURIComponent(r.pusher || "")}">${h(r.pusher)}</a>`},
