@@ -1,0 +1,8 @@
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+itsdangerous==2.2.0
+PyJWT[crypto]==2.15.1
+httpx==0.28.1
+anthropic==1.15.0
+openai==3.33.0
+graphifyy==0.9.92

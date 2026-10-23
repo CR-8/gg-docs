@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>People</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><nav></nav>
+<h1>People</h1>
+<p class="muted">Per person over the chosen period. Click a column to sort, a name for details. These are signals for
+conversations, not a verdict: someone who touches risky code gets more review findings.</p>
+<form class="filters" id="f">
+  <select name="days"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">1 year</option></select>
+</form>
+<div id="people" class="muted">Loading...</div>
+<details><summary>What the columns count</summary><ul>
+  <li><b>Commits, +/-</b>: non-merge commits on any branch and the lines they add and delete.</li>
+  <li><b>Pushes</b>: pushes made by this GitHub login (webhooks and Events API).</li>
+  <li><b>Broke CI</b>: commits by this person on a default branch where a check that passed on the previous commit failed. <i>Open</i> = still failing.</li>
+  <li><b>Findings</b>: review-bot findings on lines this person wrote (git blame), by severity. <b>Slop</b> = findings in the slop category.</li>
+  <li><b>Per 1k lines</b>: findings weighted nit 0.5, minor 1, major 3, critical 8, per 1,000 added lines.</li>
+  <li><b>Sonar</b>: open SonarQube issues blamed to this person: reliability, security, maintainability.</li>
+</ul></details>
+<div id="detail"></div>
+<script type="module">
+import {api, nav, h, when, repoName, commitLink, prLink, table} from "/static/app.js";
+nav("/people");
+const form = document.getElementById("f");
+const sonar = r => [r.sonar_reliability, r.sonar_security, r.sonar_maintainability].some(v => v)
+  ? `${r.sonar_reliability || 0} / ${r.sonar_security || 0} / ${r.sonar_maintainability || 0}` : "";
+
+async function load() {
+  const days = form.elements.days.value;
+  const rows = await api(`/api/people?days=${days}`);
+  const el = document.getElementById("people");
+  el.className = "";
+  table(el, rows, [
+    {k: "person", label: "Person", fmt: r => `<a href="#${encodeURIComponent(r.person)}">${h(r.person)}</a>`},
+    {k: "commits", label: "Commits", num: true}, {k: "adds", label: "+ lines", num: true}, {k: "dels", label: "- lines", num: true, cls: "hide-sm"},
+    {k: "pushes", label: "Pushes", num: true},
+    {k: "breakages", label: "Broke CI", num: true, fmt: r => r.breakages ? `<span class="bad">${r.breakages}</span>${r.open_breakages ? ` (${r.open_breakages} open)` : ""}` : ""},
+    {k: "findings", label: "Findings", num: true, fmt: r => r.findings ? `${r.findings} <span class="muted">${r.critical || 0}c ${r.major || 0}M ${r.minor || 0}m ${r.nit || 0}n</span>` : ""},
+    {k: "slop", label: "Slop", num: true},
+    {k: "weighted_per_kloc", label: "Per 1k lines", num: true, title: "weighted findings per 1,000 added lines"},
+    {k: "sonar_maintainability", label: "Sonar R/S/M", num: true, fmt: sonar, title: "reliability / security / maintainability"},
+  ], "commits");
+  if (location.hash) detail(decodeURIComponent(location.hash.slice(1)));
+}
+
+async function detail(person) {
+  if (!person) return;
+  const d = await api(`/api/people/${encodeURIComponent(person)}?days=${form.elements.days.value}`);
+  const el = document.getElementById("detail");
+  el.innerHTML = `<h2>${h(person)}</h2><div class="cols"><section><h2>Broke CI (${d.breakages.length})</h2><div id="d-b"></div>
+    <h2>Review findings (${d.findings.length})</h2><div id="d-f"></div></section><section><h2>Commits (${d.commits.length})</h2><div id="d-c"></div></section></div>`;
+  table(document.getElementById("d-b"), d.breakages, [
+    {k: "broken_at", label: "When", fmt: r => when(r.broken_at)}, {k: "check_name", label: "Check"},
+    {k: "broken_sha", label: "Commit", fmt: r => commitLink(r.repo, r.broken_sha)},
+    {k: "fixed_sha", label: "Fixed", fmt: r => r.fixed_sha ? commitLink(r.repo, r.fixed_sha) : '<span class="bad">open</span>'}], "broken_at");
+  table(document.getElementById("d-f"), d.findings, [
+    {k: "severity", label: "Severity"}, {k: "category", label: "Category"},
+    {k: "title", label: "Finding", fmt: r => `<a href="/reviews#r${r.review_id}">${h(r.title)}</a><div class="muted"><code>${h(r.path)}:${r.line}</code> ${r.pr ? prLink(r.repo, r.pr) : h(r.branch)}</div>`}], "id");
+  table(document.getElementById("d-c"), d.commits, [
+    {k: "committed_at", label: "When", fmt: r => when(r.committed_at)}, {k: "sha", label: "Commit", fmt: r => commitLink(r.repo, r.sha)},
+    {k: "message", label: "Message", fmt: r => `${h(r.message)} <span class="muted">${h(repoName(r.repo))} +${r.additions} -${r.deletions}</span>`}], "committed_at");
+  el.scrollIntoView({behavior: "smooth"});
+}
+form.onchange = load;
+addEventListener("hashchange", () => detail(decodeURIComponent(location.hash.slice(1))));
+load().catch(e => document.getElementById("people").innerHTML = `<p class="error">${h(e.message)}</p>`);
+</script>
+</body></html>

@@ -1,0 +1,63 @@
+# GeneGenius portal on :7000 and SonarQube on :7010/sonar.    docker compose up -d --build
+# With a domain: set DOMAIN and BIND_ADDR=127.0.0.1 in .env, then add --profile https
+# (Caddy serves https://DOMAIN and https://DOMAIN/sonar with an automatic certificate).
+name: gg-portal
+services:
+  portal:
+    build: .
+    env_file: .env
+    environment:
+      SONAR_URL: http://sonarqube:9000/sonar
+      GITHUB_APP_PRIVATE_KEY_FILE: /secrets/github-app.pem
+    volumes:
+      - portal_data:/data
+      - ./secrets:/secrets:ro
+    ports: ["${BIND_ADDR:-0.0.0.0}:7000:7000"]
+    restart: unless-stopped
+
+  sonarqube:
+    image: sonarqube:community
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}
+      SONAR_WEB_CONTEXT: /sonar
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+    ports: ["${BIND_ADDR:-0.0.0.0}:7010:9000"]
+    ulimits:
+      nofile: {soft: 131072, hard: 131072}
+      nproc: 8192
+    depends_on: [sonar-db]
+    restart: unless-stopped
+
+  sonar-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD}
+      POSTGRES_DB: sonar
+    volumes: [sonar_db:/var/lib/postgresql/data]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    profiles: [https]
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [portal, sonarqube]
+    restart: unless-stopped
+
+volumes:
+  portal_data:
+  sonar_data:
+  sonar_extensions:
+  sonar_logs:
+  sonar_db:
+  caddy_data:

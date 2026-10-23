@@ -1,0 +1,11 @@
+.git
+.env
+secrets/
+data/
+site/
+work/
+.venv/
+node_modules/
+__pycache__/
+.pytest_cache/
+tests/
