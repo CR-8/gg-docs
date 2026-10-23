@@ -137,7 +137,9 @@ def run_review(repo, *, pr=0, branch="", title, author, base, head, diff_base, h
         conv = llm.Conversation(SYSTEM)
         conv.add_user(f"{header}\n\n<diff>\n{chunk}\n</diff>")
         data = parse_json(conv.step().text)
-        summaries.append(str(data.get("summary", "")))
+        # Small local models sometimes answer in prose; say so rather than store what looks like a clean review.
+        summaries.append(str(data.get("summary", "")) if data else
+                         "(The model's answer for part of this diff was not valid JSON, so that part has no findings.)")
         findings += clean(data.get("findings"), commentable)
     summary = " ".join(s for s in summaries if s).strip() or ("No reviewable changes." if not files else "")
     if skipped:
@@ -162,7 +164,8 @@ def review_pr(repo, number):
     if pr["draft"] or pr["state"] != "open":
         return
     fetch(repo)
-    git(repo, "fetch", "--quiet", "origin", f"+refs/pull/{number}/head:refs/remotes/origin/pr/{number}", auth=True)
+    # Outside refs/remotes, so `fetch --prune` keeps it and ingest_commits (--remotes) doesn't count PR heads as branches.
+    git(repo, "fetch", "--quiet", "origin", f"+refs/pull/{number}/head:refs/portal/pr/{number}", auth=True)
     base, head = pr["base"]["sha"], pr["head"]["sha"]
     prev = db.q("SELECT head_sha FROM reviews WHERE repo=? AND pr=? ORDER BY id DESC LIMIT 1", repo, number)
     if prev and git_ok(repo, "merge-base", "--is-ancestor", prev[0]["head_sha"], head):
@@ -204,7 +207,7 @@ def post(repo, number, head, rid, summary, findings, commentable):
             "Findings: " + (", ".join(f"{counts[s]} {s}" for s in SEVERITIES if counts[s]) or "none")]
     if rest:
         body += ["", "Not on a changed line:"] + [finding_line(f) for f in rest[:30]]
-    body += ["", f"[Full review in the portal]({PUBLIC_URL}/reviews#r{rid})"]
+    body += ["", f"[Full review in the portal]({PUBLIC_URL}/reviews/#r{rid})"]
     payload = {"commit_id": head, "event": "COMMENT", "body": "\n".join(body)[:60000],
                "comments": [{"path": f["path"], "line": f["line"], "side": "RIGHT",
                              "body": f"**{f['severity']} · {f['category']}** {f['title']}\n\n{f['body']}"} for f in inline]}

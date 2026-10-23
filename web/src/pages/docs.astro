@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Docs } from "@/components/Docs"
+---
+
+<Layout title="Docs" description="Documentation the portal writes for every repository: overview, architecture, data flow, system design, ML system, API and one document per component, with diagrams. It rewrites what changed after every push.">
+  <Docs client:only="react" />
+</Layout>

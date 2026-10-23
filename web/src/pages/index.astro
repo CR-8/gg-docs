@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Overview } from "@/components/Overview"
+---
+
+<Layout title="Overview" description="How the backend and frontend are organised, what CI says about each default branch, and every route.">
+  <Overview client:only="react" />
+</Layout>

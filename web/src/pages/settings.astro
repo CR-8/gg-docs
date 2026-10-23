@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Settings } from "@/components/Settings"
+---
+
+<Layout title="Settings" description="The model behind reviews and Ask, PR posting, SonarQube, and what the background jobs are doing.">
+  <Settings client:only="react" />
+</Layout>

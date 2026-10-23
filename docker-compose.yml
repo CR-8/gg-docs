@@ -52,7 +52,7 @@ services:
       OLLAMA_KEEP_ALIVE: 24h        # keep the model in RAM between requests
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_MAX_LOADED_MODELS: "1"
-    volumes: [ollama:/root/.ollama]
+    volumes: ["${OLLAMA_DIR:-ollama}:/root/.ollama"]   # OLLAMA_DIR: a host Ollama's store, reused (install.sh)
     restart: unless-stopped
 
   caddy:

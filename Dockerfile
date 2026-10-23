@@ -1,6 +1,14 @@
 # GeneGenius portal: FastAPI app + sync worker, with git, Node (dependency-cruiser) and sonar-scanner.
 FROM node:22-bookworm-slim AS node
 
+# The web frontend (Astro + shadcn/ui), built to static files the portal serves
+FROM node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web ./
+RUN npm run build
+
 FROM python:3.11-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends git curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -21,6 +29,7 @@ COPY requirements.txt package.json package-lock.json ./
 RUN pip install --no-cache-dir -r requirements.txt && npm ci --no-audit --no-fund
 COPY build.py depcruise.cjs ./
 COPY portal ./portal
+COPY --from=web /web/dist ./web/dist
 
 RUN useradd --create-home portal && mkdir /data && chown portal /data
 USER portal

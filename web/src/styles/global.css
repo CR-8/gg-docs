@@ -1,0 +1,169 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
+    --color-brand: var(--brand);
+    --color-brand-foreground: var(--brand-foreground);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* One neutral palette plus a single brand colour (the gg mark, links). Status colours come from Tailwind's
+   emerald / amber / red, as in the Kibo UI Status and Pill components. */
+:root {
+    --background: oklch(0.99 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.52 0 0);
+    --accent: oklch(0.96 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --brand: oklch(0.56 0.1 175);
+    --brand-foreground: oklch(0.99 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --radius: 0.625rem;
+}
+
+.dark {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.18 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --brand: oklch(0.76 0.1 175);
+    --brand-foreground: oklch(0.2 0.04 175);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  html {
+    @apply font-sans;
+    scrollbar-gutter: stable;
+  }
+  /* native <details> used for route groups and chat lookups */
+  summary { @apply cursor-pointer list-none select-none; }
+  summary::-webkit-details-marker { display: none; }
+}
+
+/* links inside text: brand colour, underline on hover */
+.link { @apply text-brand underline-offset-4 hover:underline; }
+
+/* ---------- rendered Markdown (components/Markdown.tsx) ---------- */
+.markdown a { @apply text-brand no-underline hover:underline; }
+.markdown pre { @apply relative border; }
+.markdown pre .copy {
+  @apply bg-background text-muted-foreground hover:text-foreground absolute top-2 right-2 rounded-md border px-2 py-0.5
+    font-sans text-[11px] opacity-0 transition-opacity;
+}
+.markdown pre:hover .copy { opacity: 1; }
+.markdown table { @apply block overflow-x-auto; }
+.markdown .diagram svg { @apply mx-auto h-auto max-w-full; }
+/* GitHub-style alerts: > [!NOTE] … */
+.markdown-alert { @apply my-4 rounded-r-lg border-l-4 py-2 pr-3 pl-4 text-sm not-italic; }
+.markdown-alert p { @apply my-1; }
+.markdown-alert-title { @apply flex items-center gap-1.5 font-medium; }
+.markdown-alert-title svg { @apply size-4 fill-current; }
+.markdown-alert-note { @apply border-sky-500 bg-sky-500/5; } .markdown-alert-note .markdown-alert-title { @apply text-sky-600 dark:text-sky-400; }
+.markdown-alert-tip { @apply border-emerald-500 bg-emerald-500/5; } .markdown-alert-tip .markdown-alert-title { @apply text-emerald-600 dark:text-emerald-400; }
+.markdown-alert-important { @apply border-violet-500 bg-violet-500/5; } .markdown-alert-important .markdown-alert-title { @apply text-violet-600 dark:text-violet-400; }
+.markdown-alert-warning { @apply border-amber-500 bg-amber-500/5; } .markdown-alert-warning .markdown-alert-title { @apply text-amber-600 dark:text-amber-400; }
+.markdown-alert-caution { @apply border-rose-500 bg-rose-500/5; } .markdown-alert-caution .markdown-alert-title { @apply text-rose-600 dark:text-rose-400; }
+/* syntax colours (highlight.js), one set per theme */
+.hljs-comment, .hljs-quote { @apply text-muted-foreground italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword { @apply text-violet-600 dark:text-violet-400; }
+.hljs-string, .hljs-attr .hljs-string, .hljs-regexp { @apply text-emerald-700 dark:text-emerald-400; }
+.hljs-number, .hljs-literal, .hljs-symbol { @apply text-amber-700 dark:text-amber-300; }
+.hljs-title, .hljs-title.function_, .hljs-section { @apply text-sky-700 dark:text-sky-400; }
+.hljs-built_in, .hljs-type, .hljs-title.class_ { @apply text-rose-700 dark:text-rose-300; }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-property { @apply text-cyan-700 dark:text-cyan-300; }
+.hljs-meta { @apply text-muted-foreground; }
+.hljs-addition { @apply bg-emerald-500/10 text-emerald-700 dark:text-emerald-300; }
+.hljs-deletion { @apply bg-rose-500/10 text-rose-700 dark:text-rose-300; }
+
+/* ---------- printing (the docs' PDF export) ---------- */
+@media print {
+  @page { margin: 16mm 14mm; }
+  header, aside, [data-print="hide"], .copy, .svg-pan-zoom-control { display: none !important; }
+  html, body { background: white !important; }
+  .print-break { break-before: page; }
+  .markdown pre, .markdown table, .markdown figure, .markdown-alert { break-inside: avoid; }
+  .markdown h2, .markdown h3 { break-after: avoid; }
+}

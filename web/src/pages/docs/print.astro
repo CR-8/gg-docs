@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { DocsPrint } from "@/components/DocsPrint"
+---
+
+<Layout title="Print" bare>
+  <DocsPrint client:only="react" />
+</Layout>
