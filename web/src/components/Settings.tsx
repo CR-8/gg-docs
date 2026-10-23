@@ -102,8 +102,8 @@ function Mcp({ admin }: { admin: boolean }) {
           </p>
           {m.data.token ? (
             <>
-              <Snippet label="Claude Code (workspace token)" text={`claude mcp add --transport http genegenius ${m.data.url} --header "Authorization: Bearer ${m.data.token}"`} />
-              <Snippet label="Codex CLI" text={`codex mcp add genegenius --url ${m.data.token_url}`} />
+              <Snippet label="Claude Code (workspace token)" text={`claude mcp add --transport http gg ${m.data.url} --header "Authorization: Bearer ${m.data.token}"`} />
+              <Snippet label="Codex CLI" text={`codex mcp add gg --url ${m.data.token_url}`} />
               <Snippet
                 label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
                 text={m.data.token_url!}
@@ -183,7 +183,7 @@ function TeamPanel({ me }: { me: NonNullable<ReturnType<typeof useMe>> }) {
               <Button size="sm" variant="outline" type="submit" disabled={name.trim() === me.workspace?.name}>Rename</Button>
             </form>
           )}
-          <div className="divide-y rounded-lg border">
+          <div className="divide-y rounded-xl border">
             {t.data.members.map((m) => (
               <div key={m.login} className="flex items-center gap-2 px-3 py-2 text-sm">
                 {m.avatar_url ? <img src={m.avatar_url} alt="" className="size-6 rounded-full" /> : (
@@ -227,7 +227,7 @@ function TeamPanel({ me }: { me: NonNullable<ReturnType<typeof useMe>> }) {
               {!!t.data.invites.length && (
                 <div>
                   <div className="text-muted-foreground mb-1 text-xs">Waiting for an answer</div>
-                  <div className="divide-y rounded-lg border">
+                  <div className="divide-y rounded-xl border">
                     {t.data.invites.map((i) => (
                       <div key={i.id} className="flex items-center gap-2 px-3 py-2 text-sm">
                         <span className="truncate">{i.email}</span>

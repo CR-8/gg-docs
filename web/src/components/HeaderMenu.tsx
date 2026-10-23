@@ -42,19 +42,24 @@ export function HeaderMenu() {
 
   return (
     <div className="ml-auto flex shrink-0 items-center gap-2">
-      <ThemeSwitcher value={theme} onChange={choose} className="hidden sm:flex" />
+      <ThemeSwitcher value={theme} onChange={choose} className="bg-card shadow-panel ring-foreground/5 hidden sm:flex" />
+      {me?.admin && (
+        <Button variant="outline" size="icon" className="bg-card shadow-panel hidden border-transparent sm:inline-flex" asChild>
+          <a href="/new/" aria-label="Connect a repository" title="Connect a repository"><Plus /></a>
+        </Button>
+      )}
       {me && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className="gap-2 px-1.5" aria-label="Account and workspaces">
+            <Button variant="ghost" className="bg-card shadow-panel h-9 gap-2 py-1 pr-1 pl-1 lg:pr-3" aria-label="Account and workspaces">
               {me.avatar_url ? (
-                <img src={me.avatar_url} alt="" className="size-6 rounded-full" />
+                <img src={me.avatar_url} alt="" className="size-7 rounded-full" />
               ) : (
-                <span className="bg-muted grid size-6 place-items-center rounded-full text-xs font-semibold uppercase">
+                <span className="bg-muted grid size-7 place-items-center rounded-full text-xs font-semibold uppercase">
                   {me.login[0]}
                 </span>
               )}
-              <span className="hidden max-w-40 truncate md:inline">{me.workspace?.name ?? me.login}</span>
+              <span className="hidden max-w-36 truncate text-[13px] lg:inline">{me.workspace?.name ?? me.login}</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-64">

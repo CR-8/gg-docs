@@ -6,12 +6,22 @@
 @plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
+/* the sidebar as an icon rail: by choice on desktop (data-sidebar on <html>), always between md and lg. Only inside
+   .sidebar, so the phone drawer keeps its labels (layouts/main.astro) */
+@custom-variant rail {
+  &:where([data-sidebar=collapsed] .sidebar, [data-sidebar=collapsed] .sidebar *) { @slot; }
+  @media (width < 64rem) { &:where(.sidebar, .sidebar *) { @slot; } }
+}
 
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
     --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
     --color-brand: var(--brand);
+    --color-inverse: var(--inverse);
+    --color-inverse-foreground: var(--inverse-foreground);
+    /* a faint lift for panels on the canvas, tinted like the canvas instead of plain black */
+    --shadow-panel: 0 1px 2px 0 oklch(0.3 0.02 255 / 0.05), 0 2px 6px -1px oklch(0.3 0.02 255 / 0.04);
     --color-brand-foreground: var(--brand-foreground);
     --color-chart-5: var(--chart-5);
     --color-chart-4: var(--chart-4);
@@ -45,29 +55,32 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* One neutral palette plus a single brand colour (the gg mark, links). Status colours come from Tailwind's
-   emerald / amber / red, as in the Kibo UI Status and Pill components. */
+/* One cool neutral palette (every gray shares hue 255) plus a single brand colour (the gg mark, links, emphasis).
+   The page is a light gray canvas and panels are white on it (DESIGN.md). Status colours come from Tailwind's
+   emerald / amber / red, as in the Kibo UI Status and Pill components; red only for real failures. */
 :root {
-    --background: oklch(0.99 0 0);
-    --foreground: oklch(0.145 0 0);
+    --background: oklch(0.958 0.005 255);
+    --foreground: oklch(0.17 0.01 255);
     --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
+    --card-foreground: oklch(0.17 0.01 255);
     --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.17 0.01 255);
+    --primary: oklch(0.2 0.012 255);
     --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.52 0 0);
-    --accent: oklch(0.96 0 0);
-    --accent-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.962 0.005 255);
+    --secondary-foreground: oklch(0.2 0.012 255);
+    --muted: oklch(0.958 0.005 255);
+    --muted-foreground: oklch(0.51 0.012 255);
+    --accent: oklch(0.948 0.006 255);
+    --accent-foreground: oklch(0.2 0.012 255);
     --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
+    --border: oklch(0.912 0.006 255);
+    --input: oklch(0.9 0.006 255);
+    --ring: oklch(0.7 0.012 255);
     --brand: oklch(0.56 0.1 175);
     --brand-foreground: oklch(0.99 0 0);
+    --inverse: oklch(0.2 0.012 255);
+    --inverse-foreground: oklch(0.985 0 0);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
@@ -77,26 +90,28 @@
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.18 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
+    --background: oklch(0.14 0.006 255);
+    --foreground: oklch(0.975 0.002 255);
+    --card: oklch(0.185 0.007 255);
+    --card-foreground: oklch(0.975 0.002 255);
+    --popover: oklch(0.205 0.007 255);
+    --popover-foreground: oklch(0.975 0.002 255);
+    --primary: oklch(0.93 0.004 255);
+    --primary-foreground: oklch(0.2 0.012 255);
+    --secondary: oklch(0.255 0.007 255);
+    --secondary-foreground: oklch(0.975 0.002 255);
+    --muted: oklch(0.235 0.007 255);
+    --muted-foreground: oklch(0.71 0.01 255);
+    --accent: oklch(0.26 0.007 255);
+    --accent-foreground: oklch(0.975 0.002 255);
     --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
+    --border: oklch(1 0 0 / 9%);
+    --input: oklch(1 0 0 / 14%);
+    --ring: oklch(0.56 0.01 255);
     --brand: oklch(0.76 0.1 175);
     --brand-foreground: oklch(0.2 0.04 175);
+    --inverse: oklch(0.27 0.01 255);
+    --inverse-foreground: oklch(0.985 0 0);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
@@ -121,6 +136,21 @@
   /* native <details> used for route groups and chat lookups */
   summary { @apply cursor-pointer list-none select-none; }
   summary::-webkit-details-marker { display: none; }
+}
+
+/* neutral stripes for chart bars (DESIGN.md: charts) */
+@utility hatch {
+  background-image: repeating-linear-gradient(135deg, color-mix(in oklch, var(--foreground) 16%, transparent) 0 1.5px,
+    transparent 1.5px 6px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* links inside text: brand colour, underline on hover */

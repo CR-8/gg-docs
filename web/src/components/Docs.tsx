@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
-import { BookOpen, Download, FileArchive, History, Printer, RefreshCw, Search, Sparkles } from "lucide-react"
+import {
+  BookOpen, Download, FileArchive, FileText, GitBranch, History, OctagonAlert, Printer, RefreshCw, Search, Sparkles,
+} from "lucide-react"
 import { api, post, short, useApi, useMe, when } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { Choice, Empty, Failed, Loading, Section, Tag, Time, useDebounced } from "@/components/common"
+import { Choice, Empty, Failed, KpiStrip, Loading, PageAside, Section, Tag, Time, useDebounced } from "@/components/common"
 import { Markdown, type Heading } from "@/components/Markdown"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -60,8 +62,9 @@ function Searcher() {
   const hits = useApi<{ repo: string; slug: string; title: string; snippet: string }[]>(query ? `/api/docs/search?q=${encodeURIComponent(query)}` : null)
   return (
     <div className="relative">
-      <Search className="text-muted-foreground absolute top-2.5 left-3 size-4" />
-      <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search every document: a module, a function, an env var…" className="h-9 pl-9" />
+      <Search className="text-muted-foreground absolute top-3 left-3.5 size-4" />
+      <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search every document: a module, a function, an env var…" aria-label="Search the docs"
+        className="bg-card shadow-panel h-10 rounded-full pl-10" />
       {query && hits.data && (
         <div className="bg-popover absolute z-30 mt-1 max-h-96 w-full overflow-auto rounded-xl border p-1 shadow-lg">
           {hits.data.length ? hits.data.map((h) => (
@@ -177,7 +180,7 @@ function HistorySheet({ name, slug, open, onOpenChange }: { name: string; slug: 
         </SheetHeader>
         <div className="space-y-4 px-4 pb-6">
           {!versions.data ? <Loading /> : (
-            <div className="divide-y rounded-lg border">
+            <div className="divide-y rounded-xl border">
               {versions.data.map((v, i) => (
                 <button key={v.id} onClick={() => setVid(v.id)} className={cn("hover:bg-muted/50 flex w-full items-center gap-3 px-3 py-2 text-left text-sm", vid === v.id && "bg-muted")}>
                   <span className="font-mono text-xs">{short(v.head_sha)}</span>
@@ -189,7 +192,7 @@ function HistorySheet({ name, slug, open, onOpenChange }: { name: string; slug: 
             </div>
           )}
           {vid && (!diff.data ? <Loading /> : (
-            <pre className="bg-muted max-h-[60svh] overflow-auto rounded-lg border p-3 font-mono text-[11px] leading-relaxed">
+            <pre className="bg-muted max-h-[60svh] overflow-auto rounded-xl border p-3 font-mono text-[11px] leading-relaxed">
               {diff.data.diff.split("\n").map((line, i) => (
                 <div key={i} className={cn(line.startsWith("+") && !line.startsWith("+++") && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
                   line.startsWith("-") && !line.startsWith("---") && "bg-rose-500/10 text-rose-700 dark:text-rose-300",
@@ -262,7 +265,7 @@ function Reader({ r, slug, admin }: { r: RepoDocs; slug: string; admin: boolean 
             <AlertDescription>{doc.error}</AlertDescription>
           </Alert>
         )}
-        <div className="bg-card rounded-xl border px-5 py-6 sm:px-8">
+        <div className="bg-card shadow-panel ring-foreground/[0.06] rounded-2xl px-5 py-6 ring-1 sm:px-8">
           <Markdown text={doc.content} fix={fix} onHeadings={setHeadings} />
         </div>
       </article>
@@ -281,8 +284,8 @@ function Sidebar({ repos, r, slug }: { repos: RepoDocs[]; r: RepoDocs; slug: str
       href={`#${r.name}/${d.slug}`}
       aria-current={d.slug === slug ? "page" : undefined}
       title={d.summary || d.title}
-      className={cn("flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors",
-        d.slug === slug ? "bg-muted text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-muted/50")}
+      className={cn("flex items-center gap-2 rounded-full px-2.5 py-1 text-sm transition-colors", // on the canvas, so card-coloured
+        d.slug === slug ? "bg-card shadow-panel text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-card/60")}
     >
       <span className={cn("size-1.5 shrink-0 rounded-full", dot(d, r.status.current))} />
       <span className="truncate">{d.title}</span>
@@ -296,7 +299,7 @@ function Sidebar({ repos, r, slug }: { repos: RepoDocs[]; r: RepoDocs; slug: str
       <Choice label="Repository" value={r.name} className="w-full" onChange={(n) => (location.hash = `${n}/${repos.find((x) => x.name === n)?.docs[0]?.slug ?? ""}`)}
         options={repos.map((x) => [x.name, x.name])} />
       <div className="px-2"><RepoStatus r={r} /></div>
-      <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter documents" className="h-8" />
+      <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter documents" aria-label="Filter documents" className="bg-card h-8 rounded-full" />
       <div>
         <p className="text-muted-foreground mb-1 px-2 text-xs font-medium">System</p>
         {system.map(item)}
@@ -324,12 +327,28 @@ export function Docs() {
     return () => clearInterval(t)
   }, [anyBusy])
 
+  const all = idx.data?.flatMap((x) => x.docs)
+  const failed = all?.filter((d) => d.error).length
+  const kpis = !idx.error && (
+    <PageAside>
+      <KpiStrip items={[
+        { label: "Repositories", icon: GitBranch, value: idx.data?.length },
+        { label: "Documents", icon: FileText, value: all?.length },
+        { label: "Written by a model", icon: Sparkles, value: all?.filter((d) => d.status === "written").length,
+          title: "The rest are reference pages built from the code alone" },
+        { label: "Failed rewrites", icon: OctagonAlert, value: failed, tone: failed ? "error" : undefined,
+          title: "Documents whose last rewrite failed; the previous version is still shown" },
+      ]} />
+    </PageAside>
+  )
+
   if (idx.error) return <Failed error={idx.error} />
-  if (!idx.data) return <Loading rows={6} />
+  if (!idx.data) return <>{kpis}<Loading rows={6} /></>
   const r = idx.data.find((x) => x.name === at.name)
-  if (!r || !at.slug) return <Home repos={idx.data} admin={!!me?.admin} />
+  if (!r || !at.slug) return <>{kpis}<Home repos={idx.data} admin={!!me?.admin} /></>
   return (
     <div className="grid gap-6 lg:grid-cols-[15rem_minmax(0,1fr)]">
+      {kpis}
       <Sidebar repos={idx.data} r={r} slug={at.slug} />
       <Reader r={r} slug={at.slug} admin={!!me?.admin} />
     </div>

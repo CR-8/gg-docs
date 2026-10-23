@@ -82,7 +82,7 @@ export function Welcome() {
         ) : !!me?.workspaces.length && (
           <div className="space-y-2">
             <p className="text-muted-foreground text-xs">Or open one of yours</p>
-            <div className="divide-y rounded-lg border">
+            <div className="divide-y rounded-xl border">
               {me.workspaces.map((w) => (
                 <button key={w.id} type="button" onClick={() => switchTo(w.id)} className="hover:bg-muted/60 flex w-full items-center gap-2 px-3 py-2 text-left text-sm">
                   <span className="truncate font-medium">{w.name}</span>

@@ -72,7 +72,7 @@ export function Ask() {
       {!log.length && (
         <div className="grid gap-2 sm:grid-cols-2">
           {EXAMPLES.map((q) => (
-            <button key={q} onClick={() => ask(q)} className="hover:bg-muted/50 rounded-xl border p-4 text-left text-sm transition-colors">
+            <button key={q} onClick={() => ask(q)} className="bg-card shadow-panel ring-foreground/[0.06] hover:ring-foreground/20 rounded-2xl p-4 text-left text-sm ring-1 transition-shadow">
               {q}
             </button>
           ))}
@@ -82,7 +82,7 @@ export function Ask() {
       <div className="space-y-6">
         {log.map((m, i) =>
           m.role === "user" ? (
-            <div key={i} className="bg-muted ml-auto w-fit max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap">{m.content}</div>
+            <div key={i} className="bg-card shadow-panel ring-foreground/[0.06] ml-auto w-fit max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ring-1">{m.content}</div>
           ) : (
             <div key={i} className="text-sm">
               {m.error ? (
@@ -97,7 +97,7 @@ export function Ask() {
                   </summary>
                   <div className="mt-2 space-y-2">
                     {m.steps.map((st, j) => (
-                      <div key={j} className="bg-muted/40 rounded-lg border p-2.5 text-xs">
+                      <div key={j} className="bg-card rounded-xl border p-2.5 text-xs">
                         <div><b className="font-medium">{st.tool}</b> <code className="text-muted-foreground font-mono break-all">{JSON.stringify(st.input)}</code></div>
                         <pre className="mt-1.5 max-h-48 overflow-auto font-mono whitespace-pre-wrap">{st.output}</pre>
                       </div>

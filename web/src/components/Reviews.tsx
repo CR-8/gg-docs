@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
+import { CircleAlert, FileSearch, ListChecks, TriangleAlert } from "lucide-react"
 import { post, repoName, useApi, useMe } from "@/lib/api"
 import {
-  Bar, Choice, DataTable, Empty, Failed, Loading, Person, Pr, Section, Severity, Sha, Tag, Time,
+  Bar, Choice, DataTable, Empty, Failed, KpiStrip, Loading, PageAside, Person, Pr, Section, Severity, Sha, Tag, Time,
 } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -28,7 +29,7 @@ function ReviewNow() {
   return (
     <form onSubmit={run} className="flex flex-wrap items-center gap-2">
       <Choice label="Repository" value={repo || repos[0]} onChange={setRepo} options={repos.map((r) => [r, repoName(r)])} />
-      <Input value={pr} onChange={(e) => setPr(e.target.value.replace(/\D/g, ""))} placeholder="PR number" inputMode="numeric" className="h-7 w-28" required />
+      <Input value={pr} onChange={(e) => setPr(e.target.value.replace(/\D/g, ""))} placeholder="PR number" inputMode="numeric" aria-label="PR number" className="bg-card h-7 w-28 rounded-full" required />
       <Button size="sm" disabled={!pr}>Review now</Button>
       <span className="text-muted-foreground text-sm">{msg}</span>
     </form>
@@ -46,11 +47,11 @@ function Detail({ id }: { id: string }) {
         <span><Sha repo={v.repo} sha={v.base_sha} /> → <Sha repo={v.repo} sha={v.head_sha} /></span>·<span>{v.model}</span>·<Time iso={v.created_at} />
         {v.posted_url && <>· <a className="link" href={v.posted_url} target="_blank" rel="noreferrer">on GitHub</a></>}
       </div>
-      <p className="bg-muted/50 rounded-lg border p-3 text-sm whitespace-pre-wrap">{v.summary || "No summary."}</p>
+      <p className="bg-muted/50 rounded-xl border p-3 text-sm whitespace-pre-wrap">{v.summary || "No summary."}</p>
       {v.findings.length ? (
         <ul className="space-y-3">
           {v.findings.map((f: any) => (
-            <li key={f.id} className="rounded-lg border p-3 text-sm">
+            <li key={f.id} className="rounded-xl border p-3 text-sm">
               <div className="flex flex-wrap items-center gap-1.5">
                 <Severity s={f.severity} /> <Tag>{f.category}</Tag>
                 <span className="font-medium">{f.title}</span>
@@ -85,8 +86,19 @@ export function Reviews() {
     setOpen("")
   }
 
+  const total = (key: string) => rows.data?.reduce((n, r) => n + (r[key] || 0), 0)
+  const critical = total("critical")
+
   return (
     <div className="space-y-6">
+      <PageAside>
+        <KpiStrip items={[
+          { label: "Reviews", icon: ListChecks, value: rows.data && (rows.data.length >= 100 ? "100+" : rows.data.length), title: "The most recent 100 at most" },
+          { label: "Findings", icon: FileSearch, value: total("findings") },
+          { label: "Critical", icon: CircleAlert, value: critical, tone: critical ? "error" : undefined },
+          { label: "Major", icon: TriangleAlert, value: total("major") },
+        ]} />
+      </PageAside>
       {me?.admin && <Bar><ReviewNow /></Bar>}
       {rows.error && <Failed error={rows.error} />}
       <Section flush title="Reviews" description="Every PR update and direct push to a default branch, reviewed on its diff only. Each finding is blamed to whoever wrote the line.">
@@ -95,7 +107,7 @@ export function Reviews() {
             rows={rows.data}
             sort="created_at"
             onRow={(r) => (location.hash = `r${r.id}`)}
-            empty={<Empty title="No reviews yet">Reviews start once a language model is set in Settings and a PR or a push to a default branch comes in.</Empty>}
+            empty={<Empty title="No reviews yet">Reviews start once a language model is set in <a className="link" href="/settings/">Settings</a> and a PR or a push to a default branch comes in.</Empty>}
             columns={[
               { key: "created_at", label: "When", render: (r) => <Time iso={r.created_at} /> },
               { key: "repo", label: "What", render: (r) => (

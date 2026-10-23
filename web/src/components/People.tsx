@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react"
+import { GitCommitHorizontal, OctagonAlert, Upload, Users } from "lucide-react"
 import { useApi, repoName } from "@/lib/api"
 import {
-  Bar, Choice, DataTable, Empty, Failed, Loading, PERIODS, Pr, Section, Severity, Sha, Tag, Time, useQueryState,
+  Bar, Choice, DataTable, Empty, Failed, KpiStrip, Loading, PageAside, PERIODS, Pr, Section, Severity, Sha, Tag, Time,
+  useQueryState,
 } from "@/components/common"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 
@@ -83,8 +85,18 @@ export function People() {
     setOpen("")
   }
 
+  const total = (key: string) => rows.data?.reduce((n, r) => n + (r[key] || 0), 0)
+
   return (
     <div className="space-y-6">
+      <PageAside>
+        <KpiStrip items={[
+          { label: "People", icon: Users, value: rows.data?.length, title: "GitHub logins or git emails with any activity in the period" },
+          { label: `Commits, ${days} days`, icon: GitCommitHorizontal, value: total("commits") },
+          { label: `Pushes, ${days} days`, icon: Upload, value: total("pushes") },
+          { label: "Open breakages", icon: OctagonAlert, value: total("open_breakages"), tone: total("open_breakages") ? "error" : undefined },
+        ]} />
+      </PageAside>
       <Bar>
         <Choice label="Period" value={days} onChange={setDays} options={PERIODS.slice(1)} />
       </Bar>

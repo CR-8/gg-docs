@@ -101,7 +101,7 @@ export function ConnectedRepos({ admin, workspace }: { admin: boolean; workspace
       {!r.data ? <Loading rows={2} /> : (
         <div className="space-y-3">
           {r.data.repositories.length ? (
-            <div className="divide-y rounded-lg border">
+            <div className="divide-y rounded-xl border">
               {r.data.repositories.map((x) => (
                 <div key={x.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
                   <span className="font-mono text-xs">{x.repo}</span>
@@ -259,14 +259,14 @@ export function ApiClients({ admin }: { admin: boolean }) {
       {!c.data ? <Loading rows={2} /> : (
         <div className="space-y-4">
           {made && (
-            <div className="space-y-2 rounded-lg border p-3">
+            <div className="space-y-2 rounded-xl border p-3">
               <Note>Copy the secret now: it is shown this once and stored only as a hash.</Note>
               <Snippet label="Get a token" text={`curl -s ${origin}/api/v1/auth/token -H 'Content-Type: application/json' -d '{"grant_type":"client_credentials","client_id":"${made.client.client_id}","client_secret":"${made.client_secret}"}'`} />
               <Snippet label="Then call the API with it" text={`curl -s ${origin}/api/v1/auth/me -H "Authorization: Bearer <access_token>"`} />
             </div>
           )}
           {!!c.data.clients.length && (
-            <div className="divide-y rounded-lg border">
+            <div className="divide-y rounded-xl border">
               {c.data.clients.map((x) => (
                 <div key={x.client_id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
                   <span className="font-medium">{x.name}</span>
@@ -286,7 +286,7 @@ export function ApiClients({ admin }: { admin: boolean }) {
             <div className="flex flex-wrap gap-2">
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Nightly CI" aria-label="Client name" className="h-8 w-56" maxLength={80} required />
               {!!flows.data?.workflows.length && (
-                <select value={flow} onChange={(e) => setFlow(e.target.value)} aria-label="Bind to a workflow" className="bg-background h-8 rounded-md border px-2 text-sm">
+                <select value={flow} onChange={(e) => setFlow(e.target.value)} aria-label="Bind to a workflow" className="bg-card h-8 rounded-full border px-3 text-sm">
                   <option value="">Any workflow</option>
                   {flows.data.workflows.map((w) => <option key={w.workflow_id} value={w.workflow_id}>Only {w.name}</option>)}
                 </select>

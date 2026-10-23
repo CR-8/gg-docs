@@ -1,6 +1,7 @@
 // The handful of pieces every page is built from, so they all read the same.
 import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { ArrowDown, ArrowUp, Check, Copy as CopyIcon } from "lucide-react"
+import { createPortal } from "react-dom"
+import { ArrowDown, ArrowUp, Check, Copy as CopyIcon, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ago, FAIL, PASS, short, when } from "@/lib/api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -21,7 +22,7 @@ export const Choice = (props: {
   className?: string
 }) => (
   <Select value={props.value} onValueChange={props.onChange}>
-    <SelectTrigger size="sm" aria-label={props.label} className={props.className}>
+    <SelectTrigger size="sm" aria-label={props.label} className={cn("bg-card rounded-full", props.className)}>
       <SelectValue />
     </SelectTrigger>
     <SelectContent>
@@ -64,20 +65,72 @@ export function Section(props: {
   description?: ReactNode
   action?: ReactNode
   flush?: boolean
+  grow?: boolean // the body fills the card's height, so a last child with mt-auto sits at the bottom
   className?: string
   children: ReactNode
 }) {
   return (
-    <Card className={cn("gap-0 py-0", props.className)}>
-      <CardHeader className="border-b py-3.5">
-        <CardTitle>{props.title}</CardTitle>
-        {props.description && <CardDescription>{props.description}</CardDescription>}
+    <Card className={cn("shadow-panel ring-foreground/[0.06] gap-0 rounded-2xl py-0", props.className)}>
+      <CardHeader className={props.flush ? "border-b pt-4 pb-3" : "pt-4 pb-1"}>
+        <CardTitle className="text-[15px] font-medium">{props.title}</CardTitle>
+        {props.description && <CardDescription className="text-pretty">{props.description}</CardDescription>}
         {props.action && <CardAction>{props.action}</CardAction>}
       </CardHeader>
-      <CardContent className={props.flush ? "px-0" : "py-4"}>{props.children}</CardContent>
+      <CardContent className={cn(props.flush ? "px-0" : "pt-3 pb-4", props.grow && "flex flex-1 flex-col")}>{props.children}</CardContent>
     </Card>
   )
 }
+
+/** Renders into the right side of the page head (#page-aside in layouts/main.astro), from inside a page's island,
+ * so a page's KPIs sit next to its title and follow the page's own filters. */
+export function PageAside({ children }: { children: ReactNode }) {
+  const el = typeof document === "undefined" ? null : document.getElementById("page-aside")
+  return el ? createPortal(children, el) : null
+}
+
+export type Kpi = {
+  label: string
+  icon: LucideIcon
+  /** undefined: still loading; null: not available (shown as a dash, never as 0) */
+  value: ReactNode | null | undefined
+  tone?: "error" | "brand"
+  title?: string // what exactly is counted, on hover
+  href?: string
+}
+
+/** A page's headline numbers: an icon disc, the value, a short label. Values come from the API only (DESIGN.md). */
+export const KpiStrip = ({ items }: { items: Kpi[] }) => (
+  <ul className="grid grid-cols-2 gap-x-6 gap-y-4 sm:flex sm:flex-wrap sm:justify-end sm:gap-x-7">
+    {items.map((k) => {
+      const Icon = k.icon
+      const Tag = k.href ? "a" : "div"
+      return (
+        <li key={k.label} title={k.title} className="min-w-0">
+          <Tag href={k.href} className={cn("flex items-center gap-3", k.href && "hover:bg-card/70 -m-1.5 rounded-2xl p-1.5 transition-colors")}>
+            <span className={cn("bg-card shadow-panel ring-foreground/5 grid size-10 shrink-0 place-items-center rounded-full ring-1",
+              k.tone === "error" && "text-destructive", k.tone === "brand" && "text-brand")}>
+              <Icon className="size-[18px]" aria-hidden />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-2xl leading-none font-semibold tracking-tight tabular-nums">
+                {k.value === undefined ? <Skeleton className="h-6 w-12" /> : k.value === null ? <span className="text-muted-foreground">–</span> : k.value}
+              </span>
+              <span className="text-muted-foreground mt-1.5 block text-xs whitespace-nowrap">{k.label}</span>
+            </span>
+          </Tag>
+        </li>
+      )
+    })}
+  </ul>
+)
+
+/** A small labelled value inside a panel. */
+export const Tile = ({ label, children, title, className }: { label: string; children: ReactNode; title?: string; className?: string }) => (
+  <div className={cn("bg-muted/60 rounded-xl px-3 py-2.5", className)} title={title}>
+    <div className="text-muted-foreground text-xs">{label}</div>
+    <div className="mt-0.5 text-lg font-semibold tabular-nums">{children ?? <span className="text-muted-foreground">–</span>}</div>
+  </div>
+)
 
 /** Filters and actions above a page's content. */
 export const Bar = ({ children }: { children: ReactNode }) => (
@@ -199,7 +252,8 @@ export function DataTable<T extends Record<string, any>>(props: {
       <TableHeader>
         <TableRow className="hover:bg-transparent">
           {props.columns.map((c) => (
-            <TableHead key={c.key} title={c.title} className={cn(cell(c), "first:pl-4 last:pr-4")}>
+            <TableHead key={c.key} title={c.title} className={cn(cell(c), "first:pl-4 last:pr-4")}
+              aria-sort={c.key === key ? (down ? "descending" : "ascending") : undefined}>
               <button
                 className="hover:text-foreground inline-flex items-center gap-1"
                 onClick={() => {
@@ -260,7 +314,7 @@ export function Copy({ text }: { text: string }) {
 export const Snippet = ({ label, text }: { label: ReactNode; text: string }) => (
   <div>
     <div className="text-muted-foreground mb-1 text-xs">{label}</div>
-    <div className="bg-muted flex items-start gap-2 rounded-lg py-2 pr-2 pl-3">
+    <div className="bg-muted flex items-start gap-2 rounded-xl py-2 pr-2 pl-3">
       <code className="flex-1 font-mono text-xs break-all whitespace-pre-wrap">{text}</code>
       <Copy text={text} />
     </div>

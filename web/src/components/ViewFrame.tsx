@@ -6,18 +6,18 @@ import { Empty, Loading } from "@/components/common"
 import { Markdown } from "@/components/Markdown"
 import { Button } from "@/components/ui/button"
 
-/** Links styled like shadcn's TabsList, since each tab is its own page. */
+/** Links styled like the pill tabs and the main navigation, since each tab is its own page. */
 function LinkTabs({ items }: { items: { href: string; label: string; on: boolean }[] }) {
   return (
-    <nav className="bg-muted text-muted-foreground inline-flex flex-wrap rounded-lg p-[3px]">
+    <nav className="bg-card shadow-panel ring-foreground/5 text-muted-foreground inline-flex flex-wrap gap-0.5 rounded-full p-1 ring-1">
       {items.map((t) => (
         <a
           key={t.href}
           href={t.href}
           aria-current={t.on ? "page" : undefined}
           className={cn(
-            "rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
-            t.on ? "bg-background text-foreground shadow-sm" : "hover:text-foreground"
+            "rounded-full px-3 py-1 text-[13px] font-medium transition-colors",
+            t.on ? "bg-primary text-primary-foreground" : "hover:bg-muted hover:text-foreground"
           )}
         >
           {t.label}

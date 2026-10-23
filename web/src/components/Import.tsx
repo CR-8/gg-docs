@@ -130,7 +130,7 @@ export function Import() {
               options={[["all", "All"], ["owner", "Yours"], ["organization", "Organizations"], ["collaborator", "Collaborator"]]} />
             <div className="relative">
               <Search className="text-muted-foreground absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
-              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Search" aria-label="Search repositories" className="h-8 w-44 pl-7 text-xs" />
+              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Search" aria-label="Search repositories" className="bg-card h-8 w-44 rounded-full pl-7 text-xs" />
             </div>
           </div>
         }

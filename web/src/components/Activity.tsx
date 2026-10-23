@@ -1,7 +1,8 @@
+import { GitCommitHorizontal, OctagonAlert, Upload, Zap } from "lucide-react"
 import { useApi, repoName } from "@/lib/api"
 import {
-  Bar, Choice, CiChecks, DataTable, Failed, Loading, PERIODS, Person, Section, Sha, Tag, Time, useDebounced, useQueryState,
-  Empty, type Check,
+  Bar, Choice, CiChecks, DataTable, Failed, KpiStrip, Loading, PageAside, PERIODS, Person, Section, Sha, Tag, Time,
+  useDebounced, useQueryState, Empty, type Check,
 } from "@/components/common"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
@@ -28,13 +29,23 @@ export function Activity() {
   const summary = useApi("/api/summary")
   const repos: string[] = summary.data?.repos ?? []
   const open = (breaks.data || []).filter((b) => !b.fixed_sha)
+  const capped = (n?: number) => (n === undefined ? undefined : n >= 100 ? "100+" : n)  // the API's default page
 
   return (
     <div className="space-y-6">
+      <PageAside>
+        <KpiStrip items={[
+          { label: `Pushes, ${days} days`, icon: Upload, value: capped(data.data?.pushes.length) },
+          { label: `Commits, ${days} days`, icon: GitCommitHorizontal, value: capped(data.data?.commits.length) },
+          { label: "Pushes that broke CI", icon: Zap, value: data.data?.pushes.filter((p) => p.broke.length).length,
+            title: "Pushes with a commit that broke a check that passed before" },
+          { label: "Open breakages", icon: OctagonAlert, value: breaks.data && open.length, tone: open.length ? "error" : undefined },
+        ]} />
+      </PageAside>
       <Bar>
         <Choice label="Repository" value={repo} onChange={setRepo} options={[["all", "All repos"], ...repos.map((r) => [r, repoName(r)] as [string, string])]} />
         <Choice label="Period" value={days} onChange={setDays} options={PERIODS.slice(0, 3)} />
-        <Input value={person} onChange={(e) => setPerson(e.target.value)} placeholder="Filter by GitHub login or email" className="h-7 w-64" />
+        <Input value={person} onChange={(e) => setPerson(e.target.value)} placeholder="Filter by GitHub login or email" aria-label="Filter by person" className="bg-card h-7 w-64 rounded-full" />
       </Bar>
 
       {open.length > 0 && (
@@ -60,7 +71,7 @@ export function Activity() {
           <DataTable
             rows={data.data.pushes}
             sort="pushed_at"
-            empty={<Empty title="No pushes in this period">Pushes come from GitHub once a token or the GitHub App is set. The commits below come straight from git.</Empty>}
+            empty={<Empty title="No pushes in this period">Pushes come from GitHub once a token or the GitHub App is set in <a className="link" href="/settings/">Settings</a>. The commits below come straight from git.</Empty>}
             columns={[
               { key: "pushed_at", label: "When", render: (r) => <Time iso={r.pushed_at} /> },
               { key: "pusher", label: "Pusher", render: (r) => <Person name={r.pusher} /> },

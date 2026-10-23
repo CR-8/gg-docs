@@ -1,0 +1,70 @@
+---
+// Brand and the main navigation, rendered twice by layouts/main.astro: in the sidebar (md and up, an icon rail when
+// collapsed) and in the phone menu drawer. `rail:` styles only apply inside the sidebar (global.css).
+import {
+  Activity, BookOpen, LayoutDashboard, ListChecks, MessagesSquare, PanelLeftClose, PanelLeftOpen, Settings, Users, X,
+} from "lucide-react"
+
+interface Props {
+  path: string
+  drawer?: boolean
+}
+const { path, drawer = false } = Astro.props
+const NAV = [
+  ["/", "Overview", LayoutDashboard],
+  ["/docs/", "Docs", BookOpen],
+  ["/activity/", "Activity", Activity],
+  ["/people/", "People", Users],
+  ["/reviews/", "Reviews", ListChecks],
+  ["/chat/", "Ask", MessagesSquare],
+  ["/settings/", "Settings", Settings],
+] as const
+const isOn = (href: string) =>
+  href === "/" ? path === "/" || path.startsWith("/views/") : path.startsWith(href)
+const item =
+  "flex h-10 items-center gap-3 rounded-full px-3 text-sm font-medium whitespace-nowrap transition-colors outline-none focus-visible:ring-2 focus-visible:ring-brand rail:justify-center rail:px-0"
+---
+
+<div class="flex h-15 shrink-0 items-center gap-2 px-4 rail:justify-center rail:px-0">
+  <a href="/" class="focus-visible:ring-brand flex min-w-0 items-center gap-2.5 rounded-full font-semibold tracking-tight outline-none focus-visible:ring-2">
+    <span class="bg-brand text-brand-foreground grid size-8 shrink-0 place-items-center rounded-full font-mono text-xs font-bold">
+      gg
+    </span>
+    <span class="truncate rail:sr-only">gg portal</span>
+  </a>
+  {
+    drawer && (
+      <button type="button" data-close autofocus aria-label="Close menu"
+        class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-brand ml-auto grid size-9 place-items-center rounded-full outline-none focus-visible:ring-2">
+        <X className="size-[18px]" />
+      </button>
+    )
+  }
+</div>
+<nav aria-label="Main" class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 py-2 [scrollbar-width:none]">
+  {
+    NAV.map(([href, name, Icon]) => (
+      <a
+        href={href}
+        aria-current={isOn(href) ? "page" : undefined}
+        title={drawer ? undefined : name}
+        class:list={[item, isOn(href) ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-muted"]}
+      >
+        <Icon className="size-[18px] shrink-0" />
+        <span class="truncate rail:sr-only">{name}</span>
+      </a>
+    ))
+  }
+</nav>
+{
+  !drawer && (
+    <div class="hidden shrink-0 border-t px-3 py-3 lg:block">
+      <button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar"
+        class:list={[item, "text-muted-foreground hover:text-foreground hover:bg-muted w-full"]}>
+        <PanelLeftClose className="size-[18px] shrink-0 in-data-[sidebar=collapsed]:hidden" />
+        <PanelLeftOpen className="hidden size-[18px] shrink-0 in-data-[sidebar=collapsed]:block" />
+        <span class="rail:sr-only">Collapse</span>
+      </button>
+    </div>
+  )
+}
