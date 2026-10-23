@@ -53,6 +53,8 @@ services:
         required: false
     environment:
       AUTH_TRUST_HOST: "true"   # Auth.js behind Caddy: use the forwarded host
+      # its public address, so Google sign-in returns there instead of to http(s)://localhost:3000
+      AUTH_URL: https://${GGOPS_DOMAIN:-ggops.localhost}
     restart: unless-stopped
 
   # GG-Ops's one scheduled job, as vercel.json has it: recurring tasks, daily at 01:00 UTC, with its CRON_SECRET.

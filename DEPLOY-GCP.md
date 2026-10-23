@@ -198,7 +198,8 @@ cd ~/gg-portal && GGOPS_DIR=~/GG-ops bash install.sh VM_IP
 ```
 
 It builds GG-Ops with its Dockerfile, adds `ggops.<ip-with-dashes>.sslip.io` to Caddy, points this portal's
-`GGOPS_URL` at it, and starts a small cron container that calls GG-Ops's recurring-tasks job daily at 01:00 UTC, as
+`GGOPS_URL` at it, sets GG-Ops's `AUTH_URL` to `https://ggops.<ip-with-dashes>.sslip.io` (Google sign-in returns
+there; an `AUTH_URL` in `.env.production` is overridden), and starts a small cron container that calls GG-Ops's recurring-tasks job daily at 01:00 UTC, as
 `vercel.json` did. `GGOPS_DIR` stays in `.env`, so later runs of `install.sh` keep GG-Ops and update it too.
 
 **4. Connect gg-docs to it** (for Settings → Your GG-Ops account). Register gg-docs once in GG-Ops:
@@ -226,6 +227,6 @@ needs that rebuild too, since the browser code has it built in.
 | The build is killed, or the VM freezes | Not enough memory: 8 GB at least, 16 GB with a local model (step 1) |
 | `permission denied` on `docker` | Log out and SSH in again after the first install (step 3) |
 | GG-Ops keeps restarting | A production setting is missing: `docker compose logs ggops` names it. Fix `.env.production`, then `docker compose up -d ggops` |
-| Google sign-in on GG-Ops says `redirect_uri_mismatch` | Add the redirect URI from section 9, step 2 |
+| Google sign-in on GG-Ops says `redirect_uri_mismatch` | Add the redirect URI from section 9, step 2. If the error names `localhost:3000`, GG-Ops lacks its `AUTH_URL`: `cd ~/gg-portal && git pull && docker compose up -d --force-recreate ggops` |
 | Invites never arrive | Port 25 is blocked on Google Cloud: use port 587 or 465 |
 | Anything else | README 6, Troubleshooting |
