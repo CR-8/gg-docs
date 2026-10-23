@@ -1,4 +1,4 @@
-# gg portal — Design System
+# gg-pulse — Design System
 
 Applies to the gg-docs web portal (`web/`). The Healthsnap and DisputeFox dashboards are visual references for density,
 soft surfaces, pill controls, rounded cards and clear metric hierarchy. This product is an engineering/workspace

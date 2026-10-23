@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One command to install and start the gg portal on a fresh Ubuntu or Debian VM, with HTTPS on
+# One command to install and start gg-pulse on a fresh Ubuntu or Debian VM, with HTTPS on
 # <ip>.sslip.io, so no domain is needed. Safe to re-run: secrets and values already in .env are kept,
 # and a re-run pulls the latest code and restarts.
 #
@@ -7,7 +7,7 @@
 #
 # The GitHub App (sign-in, cloning, webhooks; README 3.1), in one go (otherwise edit .env later and re-run):
 #   GITHUB_APP_ID=123456 GITHUB_CLIENT_ID=Iv23li... GITHUB_CLIENT_SECRET=... \
-#   APP_KEY=~/gg-reviewer.private-key.pem  bash install.sh 35.253.245.77
+#   APP_KEY=~/gg-pulse.private-key.pem  bash install.sh 35.253.245.77
 # Email for team invites (any SMTP provider; without it, invite links are copied by hand):
 #   SMTP_HOST=smtp.resend.com SMTP_USER=resend SMTP_PASSWORD=... SMTP_FROM=portal@yourdomain bash install.sh <ip>
 # Run a coder model on this VM for reviews and the chatbot (Ollama, Qwen2.5-Coder Q8 sized to the RAM):
@@ -71,7 +71,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
 if [ -f "$HERE/docker-compose.yml" ]; then
   DIR="$HERE"
 else
-  DIR="${INSTALL_DIR:-$HOME/gg-portal}"
+  DIR="${INSTALL_DIR:-$HOME/gg-pulse}"
   [ -d "$DIR/.git" ] || git clone "$REPO_URL" "$DIR"
 fi
 cd "$DIR"

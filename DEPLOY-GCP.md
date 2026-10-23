@@ -30,7 +30,7 @@ git push -u origin mvp
 
 ```bash
 # on the VM
-git clone -b mvp https://github.com/CR-8/gg-docs.git ~/gg-portal
+git clone -b mvp https://github.com/CR-8/gg-docs.git ~/gg-pulse
 ```
 
 If the repository is private, give the VM a read-only deploy key first and clone over SSH (README 3.2.0, step 3),
@@ -46,7 +46,7 @@ scp ~/mvp.bundle user@VM_IP:~/mvp.bundle
 
 ```bash
 # on the VM
-git clone -b mvp ~/mvp.bundle ~/gg-portal
+git clone -b mvp ~/mvp.bundle ~/gg-pulse
 ```
 
 To update later, make a new bundle and `scp` it over `~/mvp.bundle` again; `install.sh` pulls from it (step 6).
@@ -55,12 +55,16 @@ To update later, make a new bundle and `scp` it over `~/mvp.bundle` again; `inst
 
 ```bash
 # on the VM
-cd ~/gg-portal
+cd ~/gg-pulse
 bash install.sh VM_IP
 ```
 
 Use the `install.sh` inside this checkout. A copy of the script kept anywhere else, or one piped from `curl`, clones
 `main` instead of `mvp`.
+
+An install made before gg-pulse had its name lives in `~/gg-portal`. It works the same from there, or move it once
+(Docker's project name is fixed in `docker-compose.yml`, so the data stays):
+`mv ~/gg-portal ~/gg-pulse && cd ~/gg-pulse && docker compose up -d --force-recreate`.
 
 It installs Docker and writes `.env`. The address becomes
 `https://<ip-with-dashes>.sslip.io`, a free name that points at your IP, so no domain is needed. It also generates
@@ -71,7 +75,7 @@ URLs for the GitHub App.
 Afterwards:
 
 - Log out and SSH in again once, so `docker compose` works without `sudo`.
-- Copy `~/gg-portal/.env` somewhere safe, like a password manager. Its `TOKEN_ENCRYPTION_KEY` is needed to read the
+- Copy `~/gg-pulse/.env` somewhere safe, like a password manager. Its `TOKEN_ENCRYPTION_KEY` is needed to read the
   stored GitHub tokens and API keys.
 
 ## 4. The GitHub App, and optionally your own domain
@@ -81,14 +85,14 @@ Afterwards:
 2. Copy its private key up:
    ```bash
    # on your machine
-   scp gg-reviewer.*.private-key.pem user@VM_IP:~/gg-portal/app.pem
+   scp gg-pulse.*.private-key.pem user@VM_IP:~/gg-pulse/app.pem
    ```
 3. Re-run with the App's values, then delete the copy (the script moved it into `secrets/`):
    ```bash
    # on the VM
-   cd ~/gg-portal
-   GITHUB_APP_ID=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... APP_KEY=~/gg-portal/app.pem bash install.sh VM_IP
-   rm ~/gg-portal/app.pem
+   cd ~/gg-pulse
+   GITHUB_APP_ID=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... APP_KEY=~/gg-pulse/app.pem bash install.sh VM_IP
+   rm ~/gg-pulse/app.pem
    ```
 
 **Your own domain instead of sslip.io:** at your DNS provider, add an A record pointing the name at `VM_IP`. Once it
@@ -126,7 +130,7 @@ In the GitHub App, Advanced → **Recent deliveries** should show `200` for the 
 
 ```bash
 # on the VM
-cd ~/gg-portal && bash install.sh VM_IP
+cd ~/gg-pulse && bash install.sh VM_IP
 ```
 
 It pulls the branch (from GitHub, or from a fresh `~/mvp.bundle`), keeps everything already in `.env`, rebuilds and
@@ -142,7 +146,7 @@ restarts. The quicker equivalent is `git pull && docker compose up -d --build`.
 
 ```bash
 # on the VM
-cd ~/gg-portal && docker compose exec -T mongo mongodump --archive --gzip --db gg-docs > ~/gg-docs-$(date +%F).archive.gz
+cd ~/gg-pulse && docker compose exec -T mongo mongodump --archive --gzip --db gg-docs > ~/gg-docs-$(date +%F).archive.gz
 ```
 
 ```bash
@@ -201,7 +205,7 @@ provider and email must all be there. For this server:
 **3. Install** (on the VM):
 
 ```bash
-cd ~/gg-portal && GGOPS_DIR=~/GG-ops bash install.sh VM_IP
+cd ~/gg-pulse && GGOPS_DIR=~/GG-ops bash install.sh VM_IP
 ```
 
 It builds GG-Ops with its Dockerfile, adds `ggops.<ip-with-dashes>.sslip.io` to Caddy, points this portal's
@@ -215,13 +219,13 @@ there; an `AUTH_URL` in `.env.production` is overridden), and starts a small cro
 curl -s -X POST https://ggops.<ip-with-dashes>.sslip.io/oauth/register -H 'content-type: application/json' -d '{"client_name":"GG-Docs","redirect_uris":["https://<ip-with-dashes>.sslip.io/connect/ggops/callback"]}'
 ```
 
-Put the `client_id` it returns in `~/gg-portal/.env` as `GGOPS_CLIENT_ID=...`, then
-`cd ~/gg-portal && docker compose up -d`.
+Put the `client_id` it returns in `~/gg-pulse/.env` as `GGOPS_CLIENT_ID=...`, then
+`cd ~/gg-pulse && docker compose up -d`.
 
 **Updating GG-Ops:** re-run `install.sh`: it pulls the branch (with a bundle, `scp` a new one over `~/ggops.bundle` first). A changed Pusher key
 needs that rebuild too, since the browser code has it built in.
 
-**Turning it off:** delete `GGOPS_DIR` and `GGOPS_DOMAIN` from `~/gg-portal/.env`, take `ggops` out of
+**Turning it off:** delete `GGOPS_DIR` and `GGOPS_DOMAIN` from `~/gg-pulse/.env`, take `ggops` out of
 `COMPOSE_PROFILES`, then `docker compose up -d --remove-orphans`.
 
 ## 10. Troubleshooting
@@ -234,6 +238,6 @@ needs that rebuild too, since the browser code has it built in.
 | The build is killed, or the VM freezes | Not enough memory: 8 GB at least, 16 GB with a local model (step 1) |
 | `permission denied` on `docker` | Log out and SSH in again after the first install (step 3) |
 | GG-Ops keeps restarting | A production setting is missing: `docker compose logs ggops` names it. Fix `.env.production`, then `docker compose up -d ggops` |
-| Google sign-in on GG-Ops says `redirect_uri_mismatch` | Add the redirect URI from section 9, step 2. If the error names `localhost:3000`, GG-Ops lacks its `AUTH_URL`: `cd ~/gg-portal && git pull && docker compose up -d --force-recreate ggops` |
+| Google sign-in on GG-Ops says `redirect_uri_mismatch` | Add the redirect URI from section 9, step 2. If the error names `localhost:3000`, GG-Ops lacks its `AUTH_URL`: `cd ~/gg-pulse && git pull && docker compose up -d --force-recreate ggops` |
 | Invites never arrive | Port 25 is blocked on Google Cloud: use port 587 or 465 |
 | Anything else | README 6, Troubleshooting |

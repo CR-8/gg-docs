@@ -39,7 +39,7 @@ export function DocsPrint() {
       </div>
       {docs && !slug && (
         <section className="mb-16 pt-24">
-          <p className="text-muted-foreground text-sm">gg engineering documentation</p>
+          <p className="text-muted-foreground text-sm">gg-pulse documentation</p>
           <h1 className="mt-2 text-4xl font-semibold tracking-tight">{name}</h1>
           <p className="text-muted-foreground mt-3 text-sm">{docs.length} documents · generated from <span className="font-mono">{short(docs[0]?.head_sha)}</span> · {new Date().toLocaleDateString()}</p>
           <ol className="mt-10 space-y-1 text-sm">{docs.map((d) => <li key={d.slug}>{d.title}</li>)}</ol>

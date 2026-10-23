@@ -1,4 +1,4 @@
-"""gg portal: git-synced architecture views, CI breakage tracking, PR review bot and chatbot.
+"""gg-pulse: git-synced architecture views, CI breakage tracking, PR review bot and chatbot.
 
 Multi-tenant: every workspace's data is in MongoDB (db.py), each document tagged with its workspace; clones and
 generated files are under data/workspaces/<id>/. WORKSPACE says which tenant the current request or job is for;

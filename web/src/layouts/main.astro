@@ -20,7 +20,7 @@ const path = Astro.url.pathname
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>{title} · gg</title>
+    <title>{title} · gg-pulse</title>
     {description && <meta name="description" content={description} />}
     <script is:inline>
       // before first paint, so there is no flash: the saved choices, else the OS setting and an open sidebar
@@ -74,7 +74,7 @@ const path = Astro.url.pathname
               >
                 <Menu className="size-[18px]" />
               </button>
-              <a href="/" class="bg-brand text-brand-foreground grid size-8 place-items-center rounded-full font-mono text-xs font-bold md:hidden" aria-label="gg overview">
+              <a href="/" class="bg-brand text-brand-foreground grid size-8 place-items-center rounded-full font-mono text-xs font-bold md:hidden" aria-label="gg-pulse overview">
                 gg
               </a>
               <HeaderMenu client:only="react" />

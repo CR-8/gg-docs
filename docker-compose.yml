@@ -1,8 +1,10 @@
-# gg portal on :7000, with its MongoDB.    docker compose up -d --build
+# gg-pulse on :7000, with its MongoDB.    docker compose up -d --build
 # Optional parts are profiles, switched on with COMPOSE_PROFILES in .env (install.sh sets it):
 #   https - Caddy serves https://DOMAIN with an automatic certificate
 #   llm   - a local coder model (Ollama) the portal uses for reviews and the chatbot
 #   ggops - GG-Ops on the same server, at https://GGOPS_DOMAIN (install.sh GGOPS_DIR=..., DEPLOY-GCP.md)
+# Docker's project name, kept from before the rename: volumes are named after it (gg-portal_mongo_data, ...), so
+# changing it would start an empty second stack next to the running one
 name: gg-portal
 services:
   portal:

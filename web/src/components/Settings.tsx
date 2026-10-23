@@ -85,8 +85,8 @@ type MyMcp = { url: string; token_url: string; token: string; ggops: boolean; gg
 
 const agentSnippets = (url: string, token: string, tokenUrl: string, who: string) => (
   <>
-    <Snippet label={`Claude Code (${who})`} text={`claude mcp add --transport http gg ${url} --header "Authorization: Bearer ${token}"`} />
-    <Snippet label="Codex CLI" text={`codex mcp add gg --url ${tokenUrl}`} />
+    <Snippet label={`Claude Code (${who})`} text={`claude mcp add --transport http gg-pulse ${url} --header "Authorization: Bearer ${token}"`} />
+    <Snippet label="Codex CLI" text={`codex mcp add gg-pulse --url ${tokenUrl}`} />
     <Snippet
       label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
       text={tokenUrl}

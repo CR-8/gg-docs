@@ -15,7 +15,7 @@ export function Login() {
     <Card className="w-full max-w-sm gap-6 py-6 [--card-spacing:--spacing(6)]">
       <CardHeader>
         <span className="bg-brand text-brand-foreground mb-3 grid size-9 place-items-center rounded-xl font-mono text-sm font-bold">gg</span>
-        <CardTitle className="text-xl font-semibold tracking-tight">{invited ? "You're invited" : "gg engineering portal"}</CardTitle>
+        <CardTitle className="text-xl font-semibold tracking-tight">{invited ? "You're invited" : "gg-pulse"}</CardTitle>
         <CardDescription>
           {invited
             ? "Sign in with GitHub to join the workspace."

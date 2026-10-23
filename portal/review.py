@@ -204,7 +204,7 @@ def post(repo, number, head, rid, summary, findings, commentable):
     inline = [f for f in findings if f["line"] in commentable.get(f["path"], ())][:40]
     rest = [f for f in findings if f not in inline]
     counts = Counter(f["severity"] for f in findings)
-    body = ["### gg review", summary or "No summary.", "",
+    body = ["### gg-pulse review", summary or "No summary.", "",
             "Findings: " + (", ".join(f"{counts[s]} {s}" for s in SEVERITIES if counts[s]) or "none")]
     if rest:
         body += ["", "Not on a changed line:"] + [finding_line(f) for f in rest[:30]]

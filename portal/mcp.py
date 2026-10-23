@@ -69,7 +69,7 @@ def handle(msg, user=None):
             # client's own version is echoed; pin a list here if a future version changes tools/list or tools/call.
             "protocolVersion": asked if asked >= OLDEST else LATEST,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "gg-portal", "title": "gg engineering portal", "version": "1.1.0"},
+            "serverInfo": {"name": "gg-pulse", "title": "gg-pulse", "version": "1.1.0"},
             "instructions": system() + (GGOPS_NOTE if connected(user) else ""),
         }
     elif method == "ping":

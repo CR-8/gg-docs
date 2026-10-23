@@ -1,4 +1,4 @@
-# gg engineering portal
+# gg-pulse
 
 A self-hosted dashboard that stays in sync with your team's GitHub repositories and answers questions about them:
 
@@ -46,7 +46,7 @@ Tests stay in your CI. The portal reads the CI results (GitHub check runs) and n
  GitHub ─────────────────────────────────────────────────────────────┐
    ▲   ▲  REST API (installation token): commits, events, check runs │
    │   └──────────────────────────────────────────────┐               ▼
-   │ PR reviews as gg-reviewer[bot]           ┌────────┴──────────────────────────────┐
+   │ PR reviews as gg-pulse[bot]              ┌────────┴──────────────────────────────┐
    └──────────────────────────────────────────┤ portal container (:7000)              │
                                               │  FastAPI app ── pages + JSON API      │
  Browser ── "Sign in with GitHub" ──────────▶ │  worker thread ── job queue           │
@@ -383,8 +383,8 @@ breakages, people, the code graph, and the generated documentation. Its instruct
   **Allow task changes** (connect again). Workspace and API-client tokens get no GG-Ops tools.
 - **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
   ```bash
-  claude mcp add --transport http gg https://<domain>/mcp --header "Authorization: Bearer <token>"
-  codex mcp add gg --url https://<domain>/mcp/<token>
+  claude mcp add --transport http gg-pulse https://<domain>/mcp --header "Authorization: Bearer <token>"
+  codex mcp add gg-pulse --url https://<domain>/mcp/<token>
   ```
 
 ### 1.15 Workspaces, teams and importing repositories
@@ -537,7 +537,7 @@ GitHub → **your-org** → Settings → Developer settings → GitHub Apps → 
 
 | Field | Value |
 |---|---|
-| Name | `gg-reviewer` (comments appear as `gg-reviewer[bot]`) |
+| Name | `gg-pulse` (comments appear as `gg-pulse[bot]`) |
 | Homepage URL | your `PUBLIC_URL` |
 | Callback URL | `PUBLIC_URL/auth/callback` (the only one; sign-in uses PKCE and asks for no OAuth scopes) |
 | Webhook → Active, URL | `PUBLIC_URL/webhook/github` |
@@ -565,7 +565,7 @@ refreshed, and **Settings → Your GitHub account → Disconnect** revokes them 
 On a fresh Ubuntu or Debian VM (2 vCPU, 8 GB RAM, 40 GB disk), with TCP **80 and 443 open to everyone** in the cloud firewall:
 
 ```bash
-git clone https://github.com/CR-8/gg-docs.git ~/gg-portal && cd ~/gg-portal
+git clone https://github.com/CR-8/gg-docs.git ~/gg-pulse && cd ~/gg-pulse
 bash install.sh <vm-public-ip>          # e.g. bash install.sh 35.253.245.77
 ```
 
@@ -630,12 +630,12 @@ Settings can override all of this at any time. Pointing it at a hosted model (Cl
 #### Adding the GitHub App
 
 1. Create the GitHub App (3.1) with the URLs the script printed.
-2. Copy its private key to the VM: `scp <key>.pem <user>@<vm-ip>:~/gg-portal/app.pem`
+2. Copy its private key to the VM: `scp <key>.pem <user>@<vm-ip>:~/gg-pulse/app.pem`
 3. Re-run with the App's values:
    ```bash
    GITHUB_APP_ID=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... \
-   APP_KEY=~/gg-portal/app.pem bash install.sh <vm-public-ip>
-   rm ~/gg-portal/app.pem      # the script copied it into secrets/
+   APP_KEY=~/gg-pulse/app.pem bash install.sh <vm-public-ip>
+   rm ~/gg-pulse/app.pem      # the script copied it into secrets/
    ```
 
 Keep the VM's public IP **static** (an Elastic IP on AWS, or "reserve static address" on GCP). If it changes, the sslip.io name changes with it; re-run the script and update the App's URLs. To use a real domain instead, point it at the VM and run `DOMAIN=portal.example.com bash install.sh <ip>`.
@@ -670,7 +670,7 @@ sudo usermod -aG docker $USER    # then log out and back in, so docker works wit
 **3. Get the code**
 
 ```bash
-git clone https://github.com/CR-8/gg-docs.git ~/gg-portal && cd ~/gg-portal
+git clone https://github.com/CR-8/gg-docs.git ~/gg-pulse && cd ~/gg-pulse
 ```
 
 If the repository is private, give the VM a read-only deploy key first:
@@ -678,7 +678,7 @@ If the repository is private, give the VM a read-only deploy key first:
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/gg-docs -N "" && cat ~/.ssh/gg-docs.pub
 # add that public key under github.com/CR-8/gg-docs → Settings → Deploy keys (read-only), then:
-GIT_SSH_COMMAND='ssh -i ~/.ssh/gg-docs' git clone git@github.com:CR-8/gg-docs.git ~/gg-portal && cd ~/gg-portal
+GIT_SSH_COMMAND='ssh -i ~/.ssh/gg-docs' git clone git@github.com:CR-8/gg-docs.git ~/gg-pulse && cd ~/gg-pulse
 git config core.sshCommand 'ssh -i ~/.ssh/gg-docs'   # so later `git pull` uses the key too
 ```
 
@@ -687,7 +687,7 @@ git config core.sshCommand 'ssh -i ~/.ssh/gg-docs'   # so later `git pull` uses 
 ```bash
 mkdir -p secrets && chmod 700 secrets
 # from your own machine, copy the GitHub App private key up:
-#   scp gg-reviewer.*.private-key.pem ubuntu@<vm-ip>:~/gg-portal/secrets/github-app.pem
+#   scp gg-pulse.*.private-key.pem ubuntu@<vm-ip>:~/gg-pulse/secrets/github-app.pem
 chmod 600 secrets/github-app.pem
 cp .env.example .env
 openssl rand -hex 32    # paste as SESSION_SECRET
@@ -729,7 +729,7 @@ Caddy gets a Let's Encrypt certificate for `DOMAIN` on first start (DNS must alr
 **7. Keep it running and up to date**
 
 - Everything restarts on its own after a reboot (`restart: unless-stopped`, Docker enabled at boot).
-- Update: `cd ~/gg-portal && git pull && docker compose --profile https up -d --build`
+- Update: `cd ~/gg-pulse && git pull && docker compose --profile https up -d --build`
 - Back up the database and the data volume (clones, views, and the encryption key file if `TOKEN_ENCRYPTION_KEY`
   isn't set):
   ```bash
@@ -804,7 +804,7 @@ The code lives in `backend/tools/portal/`, versioned and reviewed like the rest 
    ```
 2. **Copy the portal in**, without local state (Windows PowerShell shown; `rsync -a --exclude …` on Linux/macOS):
    ```powershell
-   robocopy D:\src\gg-portal D:\src\backend\tools\portal /E /XD data site work .venv node_modules __pycache__ .pytest_cache secrets /XF .env *.log
+   robocopy D:\src\gg-pulse D:\src\backend\tools\portal /E /XD data site work .venv node_modules __pycache__ .pytest_cache secrets /XF .env *.log
    ```
    The folder brings its own `.gitignore`, so its `data/`, `.env`, `secrets/`, `.venv/` and `node_modules/` stay out of git.
 3. **Nothing else in the backend changes.**
@@ -829,9 +829,9 @@ The code lives in `backend/tools/portal/`, versioned and reviewed like the rest 
          - uses: actions/setup-python@v5
            with: {python-version: "3.11"}
          - run: pip install -r requirements.txt pytest && python -m pytest tests
-         - run: docker build -t gg-portal .
+         - run: docker build -t gg-pulse .
    ```
-   To publish the image to ECR like the backend does, copy the login and push steps from `ecr-build.yml`. You'll need a new ECR repository (for example `gg-portal`), and the `GitHubActions-ECRBuild` role's trust policy must allow this workflow.
+   To publish the image to ECR like the backend does, copy the login and push steps from `ecr-build.yml`. You'll need a new ECR repository (for example `gg-pulse`), and the `GitHubActions-ECRBuild` role's trust policy must allow this workflow.
 5. **Deploy** on the portal server:
    ```bash
    git clone https://github.com/your-org/backend.git && cd backend/tools/portal
