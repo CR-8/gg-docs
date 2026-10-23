@@ -92,7 +92,7 @@ Two triggers feed the same job queue:
   - `push` → records the pusher, branch, `before` and `after` SHAs and whether it was forced, learns the email-to-login mapping from the payload's commits, and queues a **push** job.
   - `pull_request` with action `opened`, `synchronize`, `reopened` or `ready_for_review` (drafts skipped) → queues a **review_pr** job.
   - `check_run` / `check_suite` completed → queues a **checks** job.
-- **Poller** (backup, every `POLL_SECONDS`, default 300). Queues a **sync** job per repo and a Sonar check, takes an hourly Sonar snapshot, and keeps the job log at 5,000 entries. If a webhook is ever missed, the next poll picks the change up.
+- **Poller** (backup, every `POLL_SECONDS`, default 300). Queues a **sync** job per repo and a Sonar check, takes an hourly Sonar snapshot, and keeps the job log at 5,000 entries. Each sync also queues a review for every open, non-draft PR whose current head hasn't been reviewed yet (once an LLM is set). So if webhooks are missed or can't reach the portal, pushes, CI results and PR reviews still arrive within one poll. On the first poll after an LLM is set, every open PR gets reviewed once.
 
 Jobs are de-duplicated while they wait, so a burst of pushes collapses into one rebuild. A failing job is logged (Settings → Recent jobs) and never stops the queue.
 
@@ -395,7 +395,47 @@ Caddy gets a Let's Encrypt certificate for `DOMAIN` on first start (DNS must alr
   ```
   Back up SonarQube's database too if you keep its history: the `gg-portal_sonar_db` volume, or `docker compose exec sonar-db pg_dump -U sonar sonar > sonar.sql`.
 
-**No domain?** Skip DNS and Caddy: open 7000 and 7010 **to your office IP or VPN only**, set `PUBLIC_URL=http://<vm-ip>:7000` and `SONAR_PUBLIC_URL=http://<vm-ip>:7010/sonar`, leave `BIND_ADDR=0.0.0.0`, and start with `docker compose up -d --build`. GitHub webhooks then go to `http://<vm-ip>:7000/webhook/github`; they are still signed, but logins travel without TLS, so move to HTTPS before real use.
+### 3.2.1 Access by IP address (no domain)
+
+Use this until you have a domain. It's the same install as above, with these differences:
+
+**Network.** In the security group, open **7000** (portal) and **7010** (SonarQube) instead of 80/443, **to your office or VPN IP ranges only**. These ports are plain HTTP, so anyone on the path can read login cookies. Set the rules in the cloud firewall (security group): Docker publishes ports around `ufw`, so `ufw` rules don't protect them. Give the VM an **Elastic/static IP**, because the GitHub App's URLs contain it.
+
+**GitHub webhooks (optional).** To get pushes and PR reviews within seconds instead of within 5 minutes, also allow GitHub's webhook senders on port 7000:
+```bash
+curl -s https://api.github.com/meta | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin)['hooks']))"
+```
+Add each printed range as an inbound rule for TCP 7000. GitHub changes these ranges occasionally. Without them everything still works through the 5-minute poll (pushes, CI results and PR reviews); only instant updates are lost.
+
+**GitHub App URLs** (3.1), with your VM's IP:
+
+| Field | Value |
+|---|---|
+| Homepage URL | `http://<vm-ip>:7000` |
+| Callback URL | `http://<vm-ip>:7000/auth/callback` |
+| Webhook URL | `http://<vm-ip>:7000/webhook/github` (leave SSL verification as is; it only applies to https) |
+
+**`.env`** differences:
+```ini
+PUBLIC_URL=http://<vm-ip>:7000
+SONAR_PUBLIC_URL=http://<vm-ip>:7010/sonar
+BIND_ADDR=0.0.0.0
+# leave DOMAIN empty
+```
+
+**Start without the https profile:**
+```bash
+docker compose up -d --build
+```
+
+Open `http://<vm-ip>:7000` (portal) and `http://<vm-ip>:7010/sonar` (SonarQube). Updates: `git pull && docker compose up -d --build`.
+
+**Adding HTTPS later without buying a domain:** the free wildcard DNS service sslip.io maps `<ip-with-dashes>.sslip.io` to your IP. For example, `203-0-113-5.sslip.io` resolves to `203.0.113.5`, so Caddy can get a real certificate for it. To switch:
+1. Set `DOMAIN=203-0-113-5.sslip.io` and `PUBLIC_URL=https://203-0-113-5.sslip.io` (and `SONAR_PUBLIC_URL=.../sonar`), plus `BIND_ADDR=127.0.0.1`.
+2. Open 80/443 and close 7000/7010.
+3. Update the three GitHub App URLs.
+4. Run `docker compose --profile https up -d --build`.
+
 
 ### 3.3 First run
 
