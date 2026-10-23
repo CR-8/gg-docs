@@ -120,7 +120,7 @@ def test_repository_discovery_selection_refresh_and_disconnect(monkeypatch):
     from portal import sync
     mine, org, shared = gh_repo("alice/notes", private=True), gh_repo("acme/api", "Organization"), gh_repo("bob/lib")
     readable = {r["full_name"] for r in (mine, org, shared)}
-    pages = {"/user/installations": [{"id": 1}, {"id": 2}],
+    pages = {"/user/installations": [{"id": 1, "account": {"login": "alice"}}, {"id": 2, "account": {"login": "Acme"}}],
              "/user/installations/1/repositories": [mine, org], "/user/installations/2/repositories": [org, shared]}
     monkeypatch.setattr(GitHub, "mode", property(lambda self: "app"))
     monkeypatch.setattr(gh, "paginate", lambda path, key=None, limit=1000, token=None, **kw: pages[path])
@@ -140,6 +140,7 @@ def test_repository_discovery_selection_refresh_and_disconnect(monkeypatch):
         sign_in(alice, "alice")
         listing = alice.get("/api/v1/github/repositories").json()
         assert listing["total"] == 3  # both installations, the shared repository once
+        assert listing["installed_on"] == ["Acme", "alice"]  # Import says when the person's own account isn't one
         assert {r["repo"]: r["access"] for r in listing["repositories"]} == {
             "alice/notes": "owner", "acme/api": "organization", "bob/lib": "collaborator"}
         assert [r["repo"] for r in alice.get("/api/v1/github/repositories?access=organization").json()["repositories"]] == ["acme/api"]

@@ -937,6 +937,7 @@ Set in `.env` (Docker) or the environment (local).
 | The portal stops at start, or `/healthz` is 503, with a server selection timeout | MongoDB isn't reachable at `MONGODB_URI` (the `mongo` service, Atlas network access list, credentials) |
 | A repository shows **revoked** | The App lost access (uninstalled or repository removed from it): install it again; the next sync restores it |
 | GG-Ops shows **unauthorized** | Its API key was revoked or expired: make a new one in GG-Ops and save it in Settings → Integrations |
+| Someone's Import lists only repositories they share with you | The App is installed only on your account. GitHub shows a person only repositories where the App is installed *and* they can read, so they install it on their own account or organizations (Import links it and says so). A **private** App can't be installed anywhere but its owner's account: make it public (App settings → Advanced) |
 | Import says the App isn't installed, or you can't read the repository | Install the App on that account or repository (the button links there); private repositories also need your own access |
 | An invite link says it was used or expired | Links work once, for 7 days: invite again from Settings → Team |
 | Invites aren't emailed | `SMTP_HOST` is blank, or the error is shown under the invite form; the link shown there still works |

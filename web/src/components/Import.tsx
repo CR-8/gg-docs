@@ -12,7 +12,7 @@ type Found = {
   repo: string; description: string | null; private: boolean; visibility: string; default_branch: string | null
   pushed_at: string | null; access: Access; connected: boolean; html_url: string
 }
-type Listing = { repositories: Found[]; total: number; install_url: string | null }
+type Listing = { repositories: Found[]; total: number; install_url: string | null; installed_on: string[] }
 type Result = { repository: string; ok: boolean; repo?: string; error?: string; install_url?: string }
 const ACCESS: Record<Access, string> = { owner: "yours", organization: "organization", collaborator: "collaborator" }
 
@@ -78,6 +78,9 @@ export function Import() {
   if (!me?.admin)
     return <Empty title="Only owners and admins connect repositories">Ask one of them, or create a workspace of your own.</Empty>
   const connected = results?.filter((r) => r.ok) ?? []
+  // GitHub lists only repositories where the App is installed: without it on their own account, a person sees just
+  // what others share with them there
+  const notMine = !!list.data?.install_url && !list.data.installed_on.some((a) => a.toLowerCase() === me.login.toLowerCase())
   const failed = results?.filter((r) => !r.ok) ?? []
 
   return (
@@ -88,6 +91,23 @@ export function Import() {
           <AlertDescription>
             <p>Pick them below; each is cloned, synced, reviewed and documented. You can add or remove repositories later in Settings.</p>
             <Button size="sm" variant="outline" className="mt-2" asChild><a href="/">Skip for now <ArrowRight /></a></Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {notMine && (
+        <Alert>
+          <AlertTitle>Your own repositories aren't listed yet</AlertTitle>
+          <AlertDescription>
+            <p>
+              GitHub shows only repositories where the GitHub App is installed
+              {list.data!.installed_on.length ? <> (now on {list.data!.installed_on.join(", ")})</> : null}, so below are just
+              the ones shared with you there. Install it on your account, or on your organizations, to import your own.
+            </p>
+            <Button size="sm" variant="outline" className="mt-2" asChild>
+              <a href={list.data!.install_url!} target="_blank" rel="noreferrer">Install the GitHub App <ArrowUpRight /></a>
+            </Button>
+            <p className="mt-2 text-xs">GitHub says "not found"? The App is private: its owner makes it public under the App's settings → Advanced.</p>
           </AlertDescription>
         </Alert>
       )}

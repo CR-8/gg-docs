@@ -162,14 +162,18 @@ class GitHub:
         return f"{self._app_url}/installations/new"
 
     def user_repos(self, token, login):
-        """Repositories this user can read through the App's installations (every page of each): what Import lists.
-        A repository two installations cover is listed once."""
-        out = {}
+        """Repositories this user can read through the App's installations (every page of each): what Import lists,
+        and the accounts the App is installed on. GitHub shows a user only the installations they can reach and, in
+        each, only the repositories they can read: someone whose own account hasn't installed the App sees just what
+        others share with them. A repository two installations cover is listed once."""
+        out, accounts = {}, set()
         for inst in self.paginate("/user/installations", key="installations", limit=100, token=token):
+            if account := (inst.get("account") or {}).get("login"):
+                accounts.add(account)
             for r in self.paginate(f"/user/installations/{inst['id']}/repositories", key="repositories",
                                    limit=2000, token=token):
                 out[r["id"]] = {"repo": r["full_name"], "pushed_at": r.get("pushed_at"), **repo_meta(r, login)}
-        return list(out.values())
+        return list(out.values()), sorted(accounts, key=str.lower)
 
     # ---- "Sign in with GitHub" (the App's user-authorization flow) ----
 

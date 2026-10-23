@@ -566,11 +566,12 @@ def importable(request: Request):
     """Repositories the user can import: every one their GitHub account reaches through the App's installations."""
     user = require_admin(request)
     if gh.mode != "app":
-        return {"repos": [], "install_url": None}
-    found = github_call(gh.user_repos, user_token(user), user["login"])
+        return {"repos": [], "install_url": None, "installed_on": []}
+    found, accounts = github_call(gh.user_repos, user_token(user), user["login"])
     have = {r.lower() for r in db.repos()}
     found.sort(key=lambda r: r["pushed_at"] or "", reverse=True)
-    return {"repos": [{**r, "imported": r["repo"].lower() in have} for r in found], "install_url": gh.install_url()}
+    return {"repos": [{**r, "imported": r["repo"].lower() in have} for r in found], "install_url": gh.install_url(),
+            "installed_on": accounts}
 
 
 @app.post("/api/import")
@@ -1176,12 +1177,13 @@ async def login_handoff(request: Request):
 @app.get("/api/v1/github/repositories")
 def github_repositories(request: Request, q: str = "", access: str = "", page: int = 1, per_page: int = 50):
     """Repositories the signed-in person's GitHub account can reach through the App, every page of them, with whether
-    each is owned, an organization's, or shared with them as a collaborator, and whether it is connected here."""
+    each is owned, an organization's, or shared with them as a collaborator, and whether it is connected here; and the
+    accounts the App is installed on (installed_on), so Import can say when the person's own account isn't one."""
     p = need_person(request)
     limit(f"gh-list:{p['id']}", 30, 60)
     if gh.mode != "app":
-        return {"repositories": [], "total": 0, "page": 1, "per_page": per_page, "install_url": None}
-    found = github_call(gh.user_repos, user_token(p), p["login"])
+        return {"repositories": [], "total": 0, "page": 1, "per_page": per_page, "install_url": None, "installed_on": []}
+    found, accounts = github_call(gh.user_repos, user_token(p), p["login"])
     have = {r.lower() for r in db.repos()} if WORKSPACE.get(None) else set()
     q = q.strip().lower()
     found = [r for r in found if (not q or q in r["repo"].lower() or q in (r["description"] or "").lower())
@@ -1190,7 +1192,8 @@ def github_repositories(request: Request, q: str = "", access: str = "", page: i
     per_page, page = max(1, min(per_page, 100)), max(1, page)
     return {"repositories": [{**r, "connected": r["repo"].lower() in have}
                              for r in found[(page - 1) * per_page:page * per_page]],
-            "total": len(found), "page": page, "per_page": per_page, "install_url": gh.install_url()}
+            "total": len(found), "page": page, "per_page": per_page, "install_url": gh.install_url(),
+            "installed_on": accounts}
 
 
 @app.post("/api/v1/github/disconnect")
