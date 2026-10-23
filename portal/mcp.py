@@ -2,8 +2,9 @@
 
 Streamable HTTP, stateless: each POST carries JSON-RPC and gets a plain JSON answer (the spec allows that instead of
 an SSE stream), so there are no sessions to keep. Read-only: the same tools as Ask (chat.py), with larger results.
-Auth is the workspace's MCP token, as `Authorization: Bearer <token>` or in the URL (/mcp/<token>) for clients that
-only take a URL; the token decides which workspace the agent sees.
+Auth decides which workspace the agent sees: an API client's access token with the mcp:read scope
+(`Authorization: Bearer <token>`, preferred), or the workspace's legacy MCP token, as that header or in the URL
+(/mcp/<token>) for clients that only take a URL; admins can rotate the legacy token or turn it off.
 """
 from .chat import run_tool, system, tools
 

@@ -48,7 +48,7 @@ export function Welcome() {
     e.preventDefault()
     try {
       await post("/api/workspaces", { name })
-      location.href = "/new/"
+      location.href = "/new/?onboarding=1"
     } catch (err: any) {
       setError(err.message)
     }
@@ -75,7 +75,7 @@ export function Welcome() {
             <Label htmlFor="ws-name">Workspace name</Label>
             <Input id="ws-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme engineering" maxLength={80} autoFocus required className="h-9" />
           </div>
-          <Button className="h-9 w-full">Create and import a repository <ArrowRight /></Button>
+          <Button className="h-9 w-full">Create, then pick its repositories <ArrowRight /></Button>
         </form>
         {me === undefined ? (
           <Skeleton className="h-9 w-full" />

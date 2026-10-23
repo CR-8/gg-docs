@@ -1,4 +1,4 @@
-# GeneGenius portal on :7000 and SonarQube on :7010/sonar.    docker compose up -d --build
+# GeneGenius portal on :7000 (with its MongoDB) and SonarQube on :7010/sonar.    docker compose up -d --build
 # Optional parts are profiles, switched on with COMPOSE_PROFILES in .env (install.sh sets it):
 #   https - Caddy serves https://DOMAIN and https://DOMAIN/sonar with an automatic certificate
 #   llm   - a local coder model (Ollama) the portal uses for reviews and the chatbot
@@ -10,10 +10,25 @@ services:
     environment:
       SONAR_URL: http://sonarqube:9000/sonar
       GITHUB_APP_PRIVATE_KEY_FILE: /secrets/github-app.pem
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/gg-docs}   # .env's MONGODB_URI (e.g. Atlas) wins
     volumes:
       - portal_data:/data
       - ./secrets:/secrets:ro
     ports: ["${BIND_ADDR:-0.0.0.0}:7000:7000"]
+    depends_on:
+      mongo: {condition: service_healthy}
+    restart: unless-stopped
+
+  # The portal's database (README 1.12): no published port, so only the portal reaches it. Unused (but harmless) when
+  # MONGODB_URI points elsewhere. Back it up with mongodump (README 3.2.0).
+  mongo:
+    image: mongo:8.0
+    volumes: [mongo_data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   sonarqube:
@@ -69,6 +84,7 @@ services:
 
 volumes:
   portal_data:
+  mongo_data:
   sonar_data:
   sonar_extensions:
   sonar_logs:

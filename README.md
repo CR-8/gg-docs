@@ -14,9 +14,12 @@ A self-hosted dashboard that stays in sync with the GeneGenius GitHub repositori
 | Bugs, code smells and security hotspots from static analysis | **SonarQube** at `/sonar` |
 | All of it inside your coding agent (Claude Code, Codex, ChatGPT, Mistral, Cursor, any MCP client) | the **MCP server** at `/mcp` (1.14) |
 | Your team: who is in, invites by email, which repositories are synced | **Settings → Team**, **Import** (1.15) |
+| Programs (CI, automations, GG-Ops) reading the portal with their own scoped, short-lived credentials | the **API v1** and **API clients** (1.16) |
+| Your GG-Ops projects and gg-pulse, linked to the workspace | **Settings → Integrations** (1.16) |
 
 One portal serves many teams: each **workspace** has its own repositories, members, settings and data (1.15). Sign in
-with GitHub, create a workspace, paste a repository URL, and it is cloned and kept in sync by webhooks.
+with GitHub, create a workspace, pick the repositories your GitHub account can reach, and they are cloned and kept in
+sync by webhooks. Everything is stored in MongoDB (1.12).
 
 Tests stay in your CI. The portal reads the CI results (GitHub check runs) and never runs your test suites itself.
 
@@ -49,18 +52,20 @@ Tests stay in your CI. The portal reads the CI results (GitHub check runs) and n
                                               │  FastAPI app ── pages + JSON API      │
  Browser ── "Sign in with GitHub" ──────────▶ │  worker thread ── job queue           │
                                               │  poller thread ── every 5 min         │
-                                              │  /data: SQLite, git clones, views     │
-                                              └────────┬──────────────────────────────┘
-                                                       │ sonar-scanner, issues API
-                                              ┌────────▼────────┐   ┌──────────────┐
-                                              │ SonarQube :7010 │──▶│ Postgres     │
-                                              └─────────────────┘   └──────────────┘
+ Programs ── API v1 (bearer token) ─────────▶ │  /data: git clones, views, key file   │
+                                              └──┬─────────────┬─────────────┬────────┘
+                                   MONGODB_URI   │             │ sonar-scanner, issues API
+                                     ┌───────────▼──┐ ┌────────▼────────┐   ┌──────────────┐
+                                     │ MongoDB      │ │ SonarQube :7010 │──▶│ Postgres     │
+                                     └──────────────┘ └─────────────────┘   └──────────────┘
+           server-side only: GG-Ops REST API (its API key) · gg-pulse /api/health
                                    optional:  Caddy (HTTPS on 443) in front of both
 ```
 
 | Component | What it does |
 |---|---|
-| **portal** (one container) | Runs the web app, a single **worker thread** that executes jobs one at a time, and a **poller thread**. Holds everything in the `/data` volume. |
+| **portal** (one container) | Runs the web app, a single **worker thread** that executes jobs one at a time, and a **poller thread**. Keeps clones and generated views in the `/data` volume. |
+| **MongoDB** | The database: users and their GitHub identities, workspaces, members, connected repositories, everything synced from GitHub, reviews, docs, settings, API clients and integrations (1.12). The `mongo` service in compose, or MongoDB Atlas through `MONGODB_URI`. |
 | **SonarQube** + **Postgres** | Static analysis. The portal pushes both repos into it with `sonar-scanner` and reads issues back per author. |
 | **Caddy** (optional `https` profile) | Terminates TLS with an automatic certificate and routes `/sonar` to SonarQube and everything else to the portal. |
 | **GitHub App** | The portal's identity on GitHub: it clones the repos, receives webhooks, reads CI results, posts reviews, and provides "Sign in with GitHub". |
@@ -76,8 +81,11 @@ package.json/-lock    Node tools build.py uses (dependency-cruiser, typescript)
 requirements.txt      Python dependencies of the portal (pinned)
 portal/
   __init__.py         Configuration (every environment variable is read here) and WORKSPACE, the current tenant
-  db.py               SQLite: control.db (users, workspaces, members, invites) and each workspace's database;
-                      the single-tenant upgrade
+  db.py               MongoDB: collections, indexes, the workspace-scoped access every tenant query goes through
+  secret.py           Secrets at rest (encrypted with TOKEN_ENCRYPTION_KEY) and the digests of issued credentials
+  auth.py             API clients, their short-lived access tokens, login handoffs, rate limits
+  integrations.py     GG-Ops (its REST API) and gg-pulse (its health check), called only by the server
+  migrate.py          The one-off SQLite -> MongoDB migration (python -m portal.migrate)
   github.py           GitHub App auth (a token per installation), REST helpers, OAuth login, webhook signature
   sync.py             Worker + poller: clone/fetch, ingest, breakage detection, rebuild/sonar scheduling
   review.py           The review bot
@@ -90,9 +98,9 @@ portal/
   mail.py             Invite emails over SMTP
 web/                  The frontend: Astro pages (src/pages), React islands (src/components), shadcn/ui and Kibo UI
                       components (src/components/ui, kibo-ui); `npm run build` writes web/dist
-tests/test_portal.py  Checks for the logic that is easy to get subtly wrong
+tests/                Checks for the logic that is easy to get subtly wrong, on a throwaway MongoDB database
 Dockerfile            The portal image (Python 3.11 + git + Node 22 + sonar-scanner with its own JRE)
-docker-compose.yml    portal, sonarqube, sonar-db, optional caddy
+docker-compose.yml    portal, mongo, sonarqube, sonar-db, optional caddy
 Caddyfile             HTTPS routing for the https profile
 .env.example          Every setting you need to fill in
 ```
@@ -172,7 +180,7 @@ explanations on top, from the same facts only. Without a model, every document s
 repository-wide documents, the structure: components, dependencies, routes, libraries, env vars, config files). After
 each push only the documents whose inputs changed are rewritten; a new repository gets its whole set; setting a model
 for the first time rewrites everything with prose. Every version is kept (Docs → History shows the diff), and all of
-them are searchable (SQLite FTS5). Documentation runs on its own worker thread, so a slow local model never holds up
+them are searchable (every word matches as a prefix, title hits first). Documentation runs on its own worker thread, so a slow local model never holds up
 syncs and reviews, and Ask goes first: documentation and reviews send one request at a time and start none while
 someone is waiting for an answer. Admins can rewrite one document or a whole set from the Docs page.
 
@@ -233,7 +241,7 @@ Each question runs a loop of up to 10 rounds. The model picks tools, the portal 
 
 | Tool | What it does | Safety |
 |---|---|---|
-| `sql` | One `SELECT` (or `WITH … SELECT`) on the portal database; returns up to 200 rows | Read-only connection (`mode=ro` + `query_only`), single statement only, 5-second limit |
+| `query` | One MongoDB aggregation pipeline on one of the workspace's collections (fields described in the prompt); returns up to 200 documents | Read-only stages only (`$match`, `$group`, `$project`, `$sort`, `$lookup` with from/localField/foreignField, …; no `$out`, `$merge`, `$unionWith`, `$function`, `$where`); the first stage keeps only this workspace's documents and every `$lookup` gets the same filter; 5-second limit |
 | `commit_diff` | `git show` of a commit, optionally one file's patch | Repo must be one of the two; the SHA must be hex |
 | `code_graph` | Searches the graphify code graph ("what calls X", "what imports Y") | Read-only |
 | `architecture` | Returns a section of `ARCHITECTURE.md`, or its table of contents | Read-only |
@@ -252,7 +260,7 @@ Admins choose in **Settings**:
 |---|---|
 | API type | **Claude-compatible** (Anthropic Messages API, via the official `anthropic` SDK) or **OpenAI-compatible** (Chat Completions, via the official `openai` SDK). The second covers OpenAI, Azure/OpenRouter-style gateways, vLLM, Ollama, LM Studio and similar. |
 | Base URL | Blank = the provider's own API. Otherwise your gateway or server (OpenAI-compatible servers usually end in `/v1`). |
-| API key | Stored in the portal database, never returned to the browser (shown as "saved, ends in 1234"); blank keeps the saved key. |
+| API key | Stored encrypted in MongoDB, never returned to the browser (shown as "saved, ends in 1234"); blank keeps the saved key. |
 | Model | Default `claude-opus-5-5`. |
 | Effort | Claude only (`low` … `max`, default `high`); choose "(don't send)" for models or servers that reject it. |
 
@@ -262,39 +270,74 @@ Admins choose in **Settings**:
 
 ### 1.11 Login and security
 
-- **Sign in with GitHub** (the App's user authorization, with a random `state` checked on return) is the only way in.
-  Anyone with a GitHub account can sign in; what they see is decided by the workspaces they belong to (1.15). The
-  user's GitHub token is kept (and refreshed when it expires) only to check, at import, that they can read the
-  repository.
-- **Session:** a cookie signed with `SESSION_SECRET`, `SameSite=Lax`, `Secure` when `PUBLIC_URL` is https, valid for 7 days.
-  It also remembers which of your workspaces you are in; every request is checked against your current membership.
+- **Sign in with GitHub is the way in.** "Continue with GitHub" runs the GitHub App's user authorization (OAuth web
+  flow) with a one-time `state` (login CSRF, 10 minutes, used up on return) and **PKCE** (S256). Only after GitHub's
+  answer is exchanged and stored does the portal make a session, so a failed sign-in leaves nothing half signed in.
+- **Identity is GitHub's numeric user id**, never the login: renaming a GitHub account keeps the same portal user and
+  workspaces, and someone who later takes the old name gets none of them. Login, name and avatar are refreshed at
+  every sign-in. Memberships from before someone's first sign-in (the `ADMINS` list, the SQLite era) name a login and
+  are claimed by the account that holds it at its first sign-in; from then on they follow the id. Accounts are never
+  merged by email.
+- **Identity is not repository access.** A GitHub App user token carries no OAuth scopes: it can reach only
+  repositories where the App is installed *and* the user has access. Installing the App is the separate consent step
+  for private repositories. The user's token (stored encrypted, refreshed when it expires after 8 hours) is used to
+  list their repositories and to check, before a repository is connected, that they can read it.
+- **First visit:** sign in → create a workspace (or open an invite) → pick its repositories (or skip) → the workspace.
+  No workspace page or API answers before sign-in and membership.
+- **Session:** a cookie signed with `SESSION_SECRET`, HTTP-only, `SameSite=Lax`, `Secure` when `PUBLIC_URL` is https,
+  valid for 7 days. Cookie-authenticated changes from another site are refused (`Origin`/`Sec-Fetch-Site`).
+  **Settings → Your GitHub account → Disconnect** revokes the App's authorization on GitHub, deletes the stored tokens
+  and ends every session of that person.
 - **Every page and API needs a login**, except `/auth/*`, `/healthz`, `/invite/*` (which sends you to sign in), `/mcp`
-  (its own token) and the webhook (which needs a valid signature instead).
+  (its own token), `POST /api/v1/auth/token` (client credentials) and the webhook (which needs a valid signature).
 - **Owners and admins** of a workspace are the only ones who can change its Settings, test the LLM, invite people,
-  import or remove repositories, or trigger sync, rebuild and review. Members see everything in the workspace.
-- **Tenants can't reach the server's insides:** a workspace's LLM base URL must be a public address (or the local
-  model), so nobody can point it at cloud metadata, SonarQube or other containers (`ALLOW_PRIVATE_LLM=1` lifts that on
-  a server one trusted team uses).
-- **Secrets:** the GitHub App private key is a mounted file (`secrets/github-app.pem`, read-only). LLM and Sonar keys sit in the database volume and are never sent to browsers. Invite links are stored hashed. The container runs as a non-root user.
+  connect or remove repositories, manage API clients and integrations, or trigger sync, rebuild and review. Members see
+  everything in the workspace. Every check happens on the server, per request.
+- **Programs are not people.** API clients (1.16) authenticate with their own credentials and get one-hour tokens
+  limited to the scopes an admin gave them in one workspace; a GitHub token is never accepted in their place. The one
+  bridge is the `portal:handoff` scope, which an admin must grant explicitly: it lets the client make a single-use
+  sign-in link for a member of its workspace, with that member's role, so grant it only to services you trust as much.
+- **Tenants can't reach the server's insides:** a workspace's LLM base URL and integration addresses must be public
+  (or the local model), so nobody can point them at cloud metadata, SonarQube or other containers
+  (`ALLOW_PRIVATE_LLM=1` / `ALLOW_PRIVATE_URLS=1` lift that on a server one trusted team uses).
+- **Secrets:** the GitHub App private key is a mounted file (`secrets/github-app.pem`, read-only). GitHub user tokens,
+  LLM and Sonar keys, GG-Ops keys and the legacy MCP token are stored **encrypted** (Fernet) with
+  `TOKEN_ENCRYPTION_KEY`, which is not in the database; none is ever sent back to a browser. Invite links, API client
+  secrets, access tokens and login handoffs are stored only as SHA-256 digests. The container runs as a non-root user.
+- **Audit:** sign-ins, tokens issued and refused, clients created and revoked, repositories connected and
+  disconnected, integration changes and handoffs go to the `audit_events` collection (kept two years, never secrets).
 - **Untrusted text** (diffs, commit messages, review text) is shown escaped. Chatbot answers are rendered as Markdown and sanitised with DOMPurify.
 - `DEV_USER` (automatic login for local development) only works when GitHub login is **not** configured and only for requests from the same machine.
 
 ### 1.12 Data model
 
-One SQLite database per workspace, `/data/workspaces/<id>/portal.db` (that workspace's chatbot sees this schema, and
-only this database). Users, workspaces, members, invites and imported repositories are in `/data/control.db` (1.15).
+One MongoDB database (`MONGODB_URI`, default database `gg-docs`; give the portal its own, not GG-Ops's). Tenant data
+carries `workspace_id`, and the code reaches it only through a wrapper that adds the current workspace to every query,
+write and pipeline; outside a workspace it fails instead of guessing. Identifiers the API and URLs use are the ones
+SQLite had: workspaces are integers, and reviews, findings, pushes, breakages, doc versions, events and invites keep an
+integer `id` (counters continue after them). Timestamps of synced data stay ISO-8601 strings as GitHub and git give
+them, so the API answers exactly as before; the new auth collections use dates, for their TTL indexes.
 
-| Table | One row per | Key columns |
-|---|---|---|
-| `commits` | commit (last `BACKFILL_DAYS`) | `repo, sha, person, author_email, committed_at, message, additions, deletions, files, is_merge, on_default` |
-| `identities` | git email | `email, login, name` |
-| `pushes` / `push_commits` | push / commit in a push | `repo, branch, before, after, pusher, pushed_at, forced, commits, source` |
-| `checks` | commit × CI check | `repo, sha, name, conclusion, completed_at, url` |
-| `breakages` | check that broke on a commit | `check_name, broken_sha, last_good_sha, person, pusher, broken_at, fixed_sha, fixed_at` |
-| `reviews` / `findings` | review / finding | `pr` (0 for a direct push), `branch`, `head_sha`, `summary`, `posted_url` / `path, line, severity, category, title, body, sha, person` |
-| `sonar_issues` | day × repo × author × quality | `count` |
-| `settings` | setting | LLM config, Sonar token, toggles, sync bookkeeping |
-| `events` | job run | the log under Settings → Recent jobs |
+| SQLite (before) | MongoDB collection | Unique key / indexes | Notes |
+|---|---|---|---|
+| `control.users` | `users` + `github_accounts` | `github_id` unique · `user_id` unique | Keyed by GitHub's numeric id; tokens only in `github_accounts`, encrypted. Not migrated: everyone signs in again |
+| `control.workspaces` | `workspaces` | `_id` (the old id) · `mcp_token_hash` unique | MCP token encrypted, looked up by digest |
+| `control.members` | `members` | (workspace, user) unique; (workspace, login) unique while pending | Migrated rows are *pending* until that login first signs in |
+| `control.invites` | `invites` | `token_hash` unique · `id` unique | |
+| `control.repos` | `repos` | (workspace, lower-cased repo) unique | Plus GitHub id, owner, visibility, default branch, URL, access `status` and when it was checked |
+| `settings` | `settings` | (workspace, key) unique | `llm_api_key`, `sonar_token` encrypted |
+| `identities` | `identities` | (workspace, email) unique | |
+| `commits` | `commits` | (workspace, repo, sha) unique · (workspace, person, committed_at) | |
+| `pushes` + `push_commits` | `pushes` | (workspace, repo, branch, before, after) unique · (workspace, id) unique | `commit_shas[]` (at most 250) replaces `push_commits` |
+| `pulls` | `pulls` | (workspace, repo, number) unique | |
+| `checks` | `checks` | (workspace, repo, sha, name) unique | |
+| `breakages` | `breakages` | (workspace, repo, branch, check_name, broken_sha) unique | |
+| `reviews` / `findings` | `reviews` / `findings` | (workspace, repo, pr, branch, head_sha) unique / (workspace, review_id) | |
+| `sonar_issues` | `sonar_issues` | (workspace, taken_on, repo, author_email, quality) unique | |
+| `docs` / `doc_versions` | `docs` / `doc_versions` | (workspace, repo, slug) unique / (workspace, repo, slug, id) | |
+| `docs_fts` | (none) | | A search index; search reads `docs` |
+| `events` | `events` | (workspace, id) unique | The job log, last 5,000 per workspace |
+| new | `api_clients`, `access_tokens` (TTL), `login_handoffs` (TTL), `integrations`, `workflows`, `audit_events` (TTL 2 years), `rate_limits` (TTL), `counters`, `migrations` | | 1.16 |
 
 ### 1.13 JSON API
 
@@ -317,10 +360,14 @@ Everything the pages show comes from these endpoints (login required):
 | `GET /invite/{token}` · `GET /api/invites/{token}` · `POST /api/invites/{token}/accept` | The emailed link (sign in, then the Join page) · what it is for · join |
 | `GET /api/import/repos` · `POST /api/import` `{"url"}` | Repositories you can import through the App · import one by URL (admin) |
 | `GET /api/settings/local` · `GET /api/settings/mcp` | Models downloaded into the local Ollama · MCP connection details (admin) |
+| `POST /api/settings/mcp/rotate` · `PUT /api/settings/mcp` `{"legacy": bool}` | A new legacy MCP token · turn it off or on (admin) |
+| `GET /healthz` | `{"ok", "database"}`; 503 when MongoDB is unreachable |
 | `POST /mcp` | The MCP server (1.14) |
 | `POST /api/chat` `{"history": [...], "question": "..."}` | `{"answer", "steps"}` |
 | `GET /api/settings` · `PUT /api/settings` · `POST /api/settings/test` | Settings (secrets masked) · save (admin) · test (admin) |
 | `POST /api/admin/sync` · `/rebuild` · `/review` `{"repo", "pr"}` | Queue a job (admin) |
+
+Programs use the API v1 instead (1.16).
 
 ### 1.14 The MCP server (coding agents)
 
@@ -330,9 +377,11 @@ the chatbot's tools (1.9) with larger results: PRs being worked on and updated, 
 breakages, people, SonarQube, the code graph, and the generated documentation. Its instructions explain every table.
 
 - **Read-only** and stateless: every request is one JSON-RPC call answered with JSON, so there are no sessions to lose.
-- **Auth** is the workspace's own MCP token (made with the workspace; the token decides which workspace the agent
-  sees): `Authorization: Bearer <token>`, or the token in the URL (`/mcp/<token>`) for clients that only take a URL,
-  such as ChatGPT and Le Chat. The URL is then a secret.
+- **Auth** decides which workspace the agent sees. Preferred: an **API client** with the `mcp:read` scope (1.16)
+  gets a one-hour token and sends it as `Authorization: Bearer <token>`. Still supported for clients already set up:
+  the workspace's own **legacy MCP token**, as that header or in the URL (`/mcp/<token>`) for clients that only take a
+  URL, such as ChatGPT and Le Chat (the URL is then a secret). It is stored encrypted; admins can make a new one
+  (the old one stops at once) or turn it off in Settings. Access tokens are never accepted in the URL.
 - **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
   ```bash
   claude mcp add --transport http genegenius https://<domain>/mcp --header "Authorization: Bearer <token>"
@@ -342,11 +391,11 @@ breakages, people, SonarQube, the code graph, and the generated documentation. I
 ### 1.15 Workspaces, teams and importing repositories
 
 **Workspaces.** Everyone who signs in can create workspaces and belong to several; the menu at the top right switches
-between them. Each workspace has its own folder, `/data/workspaces/<id>/`, with its database (1.12), clones (`repos/`),
-architecture views (`site/`, `work/`) and venvs. A request runs inside the workspace your session points at, a
+between them. Each workspace has its own data in MongoDB (1.12) and its own folder, `/data/workspaces/<id>/`, with
+its clones (`repos/`), architecture views (`site/`, `work/`) and venvs. A request runs inside the workspace your session points at, a
 background job inside the workspace that queued it, and an MCP call inside the workspace its token belongs to; code
 that reads a workspace's data outside one fails instead of guessing. So one team can never see another's commits,
-reviews, docs or settings, including through Ask's raw SQL.
+reviews, docs or settings, including through Ask's and MCP's query tool.
 
 | Role | Can |
 |---|---|
@@ -361,11 +410,13 @@ button (so no other website can quietly sign someone into a workspace), and adds
 A link works **once**, for **7 days**, is stored only as a hash, and can be revoked while it waits. At most 50 invites
 a day per workspace, so the server's mail can't be used for spam.
 
-**Importing a repository (Import, `/new/`)**, the way Vercel does it:
+**Connecting repositories (Import, `/new/`; right after creating a workspace it is the onboarding step)**:
 
-1. Paste a URL (`https://github.com/owner/name`, with `.git` or a `/tree/...` path, `git@github.com:owner/name.git`, or
-   `owner/name`), or pick one from **Your GitHub repositories**: every repository your GitHub account reaches through
-   the App's installations, newest push first.
+1. Pick any number from **Your GitHub repositories**: every repository your GitHub account reaches through the App's
+   installations (every page of them), newest push first, marked as *yours*, an *organization*'s, or one you are a
+   *collaborator* on, with visibility, default branch and whether it is already connected; search and filter them. Or
+   paste a URL (`https://github.com/owner/name`, with `.git` or a `/tree/...` path, `git@github.com:owner/name.git`,
+   or `owner/name`). Onboarding can be skipped: a workspace without repositories works.
 2. The portal asks GitHub **with your own token** whether you can read it. Many teams share the one App, so the App
    being able to read a repository is not enough: you must be able to as well. Then it checks that the App is
    installed on it (it clones it, reads CI and sends its webhooks). If either is missing you get an **Install the
@@ -377,15 +428,71 @@ a day per workspace, so the server's mail can't be used for spam.
 Removing a repository stops syncing it; its history and clone stay, and importing it again picks them back up. Two
 repositories with the same name can't share a workspace (one clone folder and docs URL per name).
 
+**Access is re-checked, not assumed.** Every sync first asks GitHub, with the App's token, for the repository: its
+metadata is refreshed, and if the App lost access the repository is marked **revoked** and skipped (its data stays),
+until access returns. **Settings → Repositories → Check access** re-checks every connected repository with your own
+GitHub access, showing why any of them can't be reached and how to fix it.
+
 **Architecture views and SonarQube** (1.5, 1.8) need a FastAPI backend and a Next.js frontend paired up, so only a
 workspace upgraded from a single-tenant install has them. Every workspace gets the generated docs (1.5a).
 
-**Upgrading a single-tenant install.** On the first start of this version, an existing `/data/portal.db` (with
-`repos/`, `site/`, `work/` and `venvs/`) moves into workspace 1, named after `GITHUB_ORG`, with `BACKEND_REPO`,
-`FRONTEND_REPO`, `EXTRA_REPOS` and the repositories added in Settings, its architecture views, and `MCP_TOKEN` as its
-MCP token, so connected coding agents keep working. The GitHub logins in `ADMINS` own it; they invite everyone else.
-The shared viewer and admin passwords are gone: a password says nothing about who someone is, so it can't make anyone a
-member of anything. Reconfigure the GitHub App as in 3.1 (installable by any account, Setup URL).
+**Upgrading from SQLite.** Installs from before MongoDB keep their data in SQLite files; the portal refuses to start
+until they are migrated with `python -m portal.migrate` (6.1). A single-tenant install (`/data/portal.db`, from before
+workspaces) becomes a workspace named after `GITHUB_ORG`, with `BACKEND_REPO`, `FRONTEND_REPO`, `EXTRA_REPOS` and the
+repositories added in Settings, its architecture views, and `MCP_TOKEN` as its MCP token, so connected coding agents
+keep working. The GitHub logins in `ADMINS` own it; they invite everyone else.
+
+### 1.16 API v1, API clients, login handoff and integrations
+
+For programs (CI jobs, automations, other services). Every endpoint checks, on the server and per request, who is
+calling, which workspace they act in and whether they hold the scope; a workspace the caller has no part in answers
+404. Errors are `{"error": "..."}`. A signed-in person can call the same endpoints with their session (owners and
+admins hold every scope, members the read ones).
+
+| Endpoint | Scope | What |
+|---|---|---|
+| `POST /api/v1/auth/token` | (client credentials) | OAuth 2.0 client credentials, JSON or form: `grant_type=client_credentials`, `client_id`, `client_secret`, optional `scope` (subset of the client's, space separated or a list) and `workflow_id`. Returns `{access_token, token_type: "Bearer", expires_in: 3600, scope, workflow_id}`. RFC 6749 errors: `invalid_client` (401), `invalid_scope`, `invalid_request`, `unsupported_grant_type`, `slow_down` (429) |
+| `GET /api/v1/auth/me` | any | The caller: `{user: {id, login, github: {id, login}}, workspace: {id, name, role, permissions}}` for a person, `{client, workspace, workflow_id, expires_at}` for a client |
+| `POST /api/v1/auth/logout` | any | Revokes the caller's access token, or ends the session |
+| `POST /api/v1/auth/login-handoff` | `portal:handoff` | `{next?}` (a person: for themselves) or `{github_id, next?}` (a client: a member of its workspace) → `{url, expires_in: 60}`. `GET /auth/handoff?code=…` redeems it once, atomically, into a normal session (a client-made one stays in the client's workspace) and redirects to `next`, which must be a page of the portal |
+| `GET /api/v1/github/repositories?q=&access=owner\|organization\|collaborator&page=&per_page=` | a person | Their GitHub repositories through the App, with `access`, `visibility`, `default_branch`, `connected` |
+| `POST /api/v1/github/disconnect` | a person | Revoke the App's authorization on GitHub, forget the tokens, end every session |
+| `GET /api/v1/workspaces/{id}/repositories` | `repository:read` | Connected repositories with metadata, `status` (`active`, `revoked`, `unknown`) and when they were checked |
+| `POST /api/v1/workspaces/{id}/repositories` `{"repositories": [...]}` | `repository:write`, a person | Connect up to 50, each checked against the person's own GitHub access; one result each |
+| `POST /api/v1/workspaces/{id}/repositories/refresh` | `repository:write`, a person | Re-check every connected repository (1.15) |
+| `DELETE /api/v1/workspaces/{id}/repositories/{repositoryId}` | `repository:write` | Disconnect (its data stays) |
+| `GET /api/v1/integrations` | `integration:read` | GG-Ops and gg-pulse status (never keys) and the linked workflows |
+| `PUT` / `DELETE /api/v1/integrations/{gg-ops\|gg-pulse}` `{"base_url", "api_key"}` | `integration:write` | Connect or disconnect a service |
+| `POST /api/v1/integrations/connections/verify` `{"service"}` | `integration:read` | Check it against the real service now: `{status, service, verifiedAt, detail}` |
+| `POST /api/v1/integrations/workflows` `{"workflow_id", "name"?}` · `DELETE …/workflows/{id}` | `integration:write` | Link or unlink a GG-Ops project |
+| `GET /api/v1/integrations/workflows/{workflowId}` | `workflow:read` | The project's status and task counts, read now through GG-Ops |
+| `GET` / `POST /api/v1/clients` · `DELETE /api/v1/clients/{client_id}` | `client:write` (admins) | List, create (`{name, scopes, workflow_id?}`, the secret is shown once) and revoke API clients |
+
+**API clients** (Settings → API clients) are registered by an owner or admin with explicit scopes:
+`repository:read`, `repository:write`, `workflow:read`, `integration:read`, `mcp:read`, `portal:handoff`. A client may
+be bound to one workflow, and then only sees and asks for that one. Client secrets and access tokens are 256-bit
+random strings stored only as digests; tokens live an hour (expired ones are refused at once and swept by a TTL
+index), and revoking a client ends its tokens immediately. Token requests are limited to 20 a minute per client and
+60 per address.
+
+```bash
+TOKEN=$(curl -s https://<domain>/api/v1/auth/token -H 'Content-Type: application/json' \
+  -d '{"grant_type":"client_credentials","client_id":"ggd_ci_…","client_secret":"ggd_cs_…","scope":"repository:read"}' | jq -r .access_token)
+curl -s https://<domain>/api/v1/workspaces/1/repositories -H "Authorization: Bearer $TOKEN"
+```
+
+**GG-Ops** (the team's project-management app). An admin enters its address and a **GG-Ops API key** (GG-Ops →
+Account → API keys, `ggops_sk_…`; read-only is enough). The portal calls GG-Ops's REST API v1 with it, server-side:
+`GET /api/v1/workspaces` to verify the key, `GET /api/v1/projects/{id}/tasks` for a project. A **workflow** is a GG-Ops
+project linked to the workspace by its id. The id is an identifier, not a credential: it is accepted only once GG-Ops
+shows that project to the workspace's key, every read goes through that key (so GG-Ops's own membership rules decide),
+and knowing an id gets a caller nothing unless it is linked to their workspace. Reads return the project's status and
+task counts, not task contents. Timeouts, bounded retries (3 attempts on connection errors, 429 and 5xx), and a
+revoked key shows up as status `unauthorized` instead of failing the page.
+
+**gg-pulse.** Its only HTTP API is `GET /api/health` (no authentication), so the integration is a connectivity check:
+`connected`, `degraded` (gg-pulse is up, its database isn't) or `unavailable`. It has no analytics API to read yet, so
+the portal shows none.
 
 ---
 
@@ -417,7 +524,7 @@ GitHub → **GeneGeniusinc** → Settings → Developer settings → GitHub Apps
 |---|---|
 | Name | `genegenius-reviewer` (comments appear as `genegenius-reviewer[bot]`) |
 | Homepage URL | your `PUBLIC_URL` |
-| Callback URL | `PUBLIC_URL/auth/callback` |
+| Callback URL | `PUBLIC_URL/auth/callback` (the only one; sign-in uses PKCE and asks for no OAuth scopes) |
 | Webhook → Active, URL | `PUBLIC_URL/webhook/github` |
 | Webhook secret | a long random string (`openssl rand -hex 32`); the same value goes in `GITHUB_WEBHOOK_SECRET` |
 | Repository permissions | Contents: **Read** · Metadata: **Read** · Pull requests: **Read and write** · Checks: **Read** |
@@ -432,7 +539,11 @@ Then, on the app's page:
 2. **Generate a private key**; save the downloaded `.pem` as `secrets/github-app.pem` next to `docker-compose.yml`.
 3. **Install App** → GeneGeniusinc → *Only select repositories* → `Genegenius-backend` and `Genegenius-phase-1`.
 
-"Pull requests: write" is only used to post reviews, and only when an admin turns that on.
+"Pull requests: write" is only used to post reviews, and only when an admin turns that on. Why each permission:
+Contents (clone and read code), Metadata (repository details), Checks (CI results for breakages), Pull requests (PRs to
+review, and posting reviews). Signing in reads only the public profile (`GET /user`), which needs no account
+permission. Leave **Expire user authorization tokens** on (the default): user tokens then last 8 hours and are
+refreshed, and **Settings → Your GitHub account → Disconnect** revokes them through `DELETE /applications/{client_id}/grant`.
 
 ### 3.2 Install on a cloud VM: one command
 
@@ -597,7 +708,7 @@ The portal container runs as user id 1000, which is the default `ubuntu` user on
 
 ```bash
 docker compose --profile https up -d --build     # first build takes a few minutes
-docker compose ps                                # portal, sonarqube, sonar-db, caddy: all "running"
+docker compose ps                                # portal, mongo, sonarqube, sonar-db, caddy: all "running"
 docker compose logs -f portal                    # Ctrl-C stops following, not the portal
 ```
 
@@ -613,8 +724,10 @@ Caddy gets a Let's Encrypt certificate for `DOMAIN` on first start (DNS must alr
 
 - Everything restarts on its own after a reboot (`restart: unless-stopped`, Docker enabled at boot).
 - Update: `cd ~/gg-portal && git pull && docker compose --profile https up -d --build`
-- Back up the data volume (SQLite with settings and keys, clones, views):
+- Back up the database and the data volume (clones, views, and the encryption key file if `TOKEN_ENCRYPTION_KEY`
+  isn't set):
   ```bash
+  docker compose exec -T mongo mongodump --archive --gzip --db gg-docs > gg-docs-$(date +%F).archive.gz
   docker run --rm -v gg-portal_portal_data:/d -v $PWD:/b alpine tar czf /b/portal-data-$(date +%F).tgz -C /d .
   ```
   Back up SonarQube's database too if you keep its history: the `gg-portal_sonar_db` volume, or `docker compose exec sonar-db pg_dump -U sonar sonar > sonar.sql`.
@@ -765,9 +878,12 @@ Set in `.env` (Docker) or the environment (local).
 | `PUBLIC_URL` | `http://localhost:7000` | The address people use; also the base for the OAuth callback and the links in PR reviews |
 | `DOMAIN` | | Certificate domain for the `https` profile |
 | `BIND_ADDR` | `0.0.0.0` | Interface for ports 7000/7010; `127.0.0.1` behind Caddy or nginx |
-| `GITHUB_ORG`, `BACKEND_REPO` / `FRONTEND_REPO`, `EXTRA_REPOS`, `MCP_TOKEN`, `ADMINS` | | Read once, to turn a single-tenant install into workspace 1 (1.15): its name, repositories, MCP token and owners |
+| `MONGODB_URI` | `mongodb://mongo:27017/gg-docs` in Docker, `mongodb://127.0.0.1:27017/gg-docs` otherwise | The database, with its name. Atlas: `mongodb+srv://…/gg-docs?retryWrites=true`. Its own database, not GG-Ops's |
+| `MONGODB_TIMEOUT_MS` | `10000` | How long to wait for MongoDB before a request or the start fails |
+| `TOKEN_ENCRYPTION_KEY` | a key file in `DATA_DIR` | Encrypts stored GitHub tokens and keys (`openssl rand -hex 32`). Back it up; without it they can't be read (people sign in again, admins re-enter keys) |
+| `GITHUB_ORG`, `BACKEND_REPO` / `FRONTEND_REPO`, `EXTRA_REPOS`, `MCP_TOKEN`, `ADMINS` | | Read once, by `python -m portal.migrate`, to turn a single-tenant install into a workspace (1.15): its name, repositories, MCP token and owners |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | port `587` | Email for invites (587 STARTTLS, 465 TLS). Blank host: links are copied by hand |
-| `ALLOW_PRIVATE_LLM` | | `1` lets workspaces point their LLM at private addresses (one trusted team only) |
+| `ALLOW_PRIVATE_LLM` / `ALLOW_PRIVATE_URLS` | | `1` lets workspaces point their LLM / their LLM and integrations at private addresses (one trusted team only) |
 | `GITHUB_APP_ID` | | App ID |
 | `GITHUB_APP_PRIVATE_KEY_FILE` | `/secrets/github-app.pem` in Docker | App private key file (or `GITHUB_APP_PRIVATE_KEY` with the PEM inline) |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | | The App's OAuth credentials, for "Continue with GitHub" (required to sign in) |
@@ -781,7 +897,7 @@ Set in `.env` (Docker) or the environment (local).
 | `BACKFILL_DAYS` | `90` | History loaded and kept for commits |
 | `DEFAULT_BRANCHES` | from GitHub | JSON override, e.g. `{"GeneGeniusinc/Genegenius-backend": "v2-accelerated"}` |
 | `GIT_URL_TEMPLATE` | `https://github.com/{repo}.git` | Where to clone from (`{repo}` = owner/name, `{name}` = name); local development can use folders |
-| `DATA_DIR` | `/data` | Storage: `control.db` and `workspaces/<id>/` |
+| `DATA_DIR` | `/data` | Storage: `workspaces/<id>/` (clones, views), the key file, migration reports; the old SQLite files until you remove them |
 | `BACKEND_PYTHON` | venv in the workspace's `venvs/backend` | Interpreter with the backend's requirements, for the route export |
 | `GITHUB_TOKEN` | | Without the App: one operator's token, used for every repository (local development) |
 | `COMPOSE_PROFILES` | `https` (set by `install.sh`) | Optional services to run: `https` (Caddy), `llm` (local model) |
@@ -809,7 +925,8 @@ Set in `.env` (Docker) or the environment (local).
 | Force a refresh | Settings → Sync from GitHub now / Rebuild views now |
 | Re-review a PR | Reviews → "Review this PR now" (admins). The same head is never reviewed twice. |
 | Update | `git pull && docker compose up -d --build` |
-| Back up | Docker volumes `portal_data` (the SQLite database holds settings and keys) and `sonar_db` |
+| Back up | `mongodump` of the database (3.2.0 step 8), the `portal_data` volume (clones, key file) and `sonar_db`; keep `TOKEN_ENCRYPTION_KEY` with them |
+| Health | `GET /healthz`: 200 `{"ok": true, "database": "up"}`, 503 when MongoDB is unreachable |
 | Reset everything | `docker compose down -v` (deletes all volumes) |
 | GitHub API use | About 20 requests per repo per poll, well under the App's 5,000/hour |
 
@@ -818,6 +935,10 @@ Set in `.env` (Docker) or the environment (local).
 | Symptom | Cause and fix |
 |---|---|
 | "Sign-in needs the GitHub App" | Set the App's `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (3.1) |
+| The portal stops at start: "SQLite data that is not in MongoDB yet" | Migrate it (6.1) |
+| The portal stops at start, or `/healthz` is 503, with a server selection timeout | MongoDB isn't reachable at `MONGODB_URI` (the `mongo` service, Atlas network access list, credentials) |
+| A repository shows **revoked** | The App lost access (uninstalled or repository removed from it): install it again; the next sync restores it |
+| GG-Ops shows **unauthorized** | Its API key was revoked or expired: make a new one in GG-Ops and save it in Settings → Integrations |
 | Import says the App isn't installed, or you can't read the repository | Install the App on that account or repository (the button links there); private repositories also need your own access |
 | An invite link says it was used or expired | Links work once, for 7 days: invite again from Settings → Team |
 | Invites aren't emailed | `SMTP_HOST` is blank, or the error is shown under the invite form; the link shown there still works |
@@ -829,18 +950,50 @@ Set in `.env` (Docker) or the environment (local).
 | SonarQube won't start | `vm.max_map_count` isn't set on the host (3.2) |
 | People shows emails instead of logins | Those authors haven't appeared on a default branch through the API yet; they merge automatically once they do |
 
+### 6.1 Upgrading from SQLite to MongoDB
+
+The release before this one kept everything in SQLite (`/data/control.db` and `/data/workspaces/<id>/portal.db`, or
+`/data/portal.db` on older single-tenant installs). The migration is one command, run by you; the portal never
+migrates by itself, and refuses to start while unmigrated SQLite data is there.
+
+1. **Back up** the `portal_data` volume (3.2.0 step 8). The migration only reads the SQLite files and never deletes
+   them, but keep the backup until you have checked the result.
+2. Set `TOKEN_ENCRYPTION_KEY` in `.env` (LLM and Sonar keys are re-encrypted with it), then start the database:
+   `docker compose up -d mongo`.
+3. **Dry run** (writes nothing, prints what would be inserted per table):
+   `docker compose run --rm portal python -m portal.migrate`
+4. **Apply**: `docker compose run --rm portal python -m portal.migrate --apply`. It writes in batches by each table's
+   natural key and only inserts what is missing, so it can be re-run; an interrupted run resumes where it stopped
+   (`--restart` reads everything again). It then **verifies**: row counts per table, 20 random rows per table compared
+   field by field, every finding's review present, every pushed commit present. The report is in
+   `/data/migration-report-<time>.json`; only a clean run lets the portal start.
+5. `docker compose up -d`, sign in with GitHub, and check a workspace. Everyone signs in again (sessions and GitHub
+   tokens are not carried over); members and owners are matched to their GitHub login at their first sign-in.
+6. `python -m portal.migrate --verify` compares again at any time.
+
+**Rolling back.** Nothing in SQLite changed, so: `docker compose down`, check out the previous release
+(`git checkout ac8a6de`), `docker compose up -d --build`. Changes made in the new version after the migration are not
+carried back. To retry the migration from scratch, drop the database (`docker compose exec mongo mongosh gg-docs
+--eval 'db.dropDatabase()'`) and run it again. Delete the SQLite files only once you are sure (keep the backup).
+
 ---
 
 ## 7. Local development
+
+You need a MongoDB 5.0 or newer: a local `mongod` (`mongodb://127.0.0.1:27017`, the default) or any other through
+`MONGODB_URI`.
 
 ```bash
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt pytest      # .venv/bin/pip on Linux/macOS
 npm ci
-.venv/Scripts/python -m pytest tests                       # 16 checks, including workspaces, invites, roles and
-                                                           # isolation, import access, the single-tenant upgrade,
-                                                           # MCP, PR webhooks, generated docs, webhook HMAC, diff
-                                                           # parsing, breakage detection, read-only SQL
+.venv/Scripts/python -m pytest tests                       # 30 checks on a throwaway database (gg_docs_test_*,
+                                                           # dropped afterwards; TEST_MONGODB_URL picks the server):
+                                                           # GitHub sign-in (state, PKCE, numeric ids), workspaces,
+                                                           # invites, roles and isolation, repository discovery and
+                                                           # access, API clients and scopes, login handoff, CSRF,
+                                                           # GG-Ops and gg-pulse, the SQLite migration, MCP, docs,
+                                                           # reviews, breakages, the read-only query tool
 ```
 
 Run the whole portal without a GitHub App: `DEV_USER` signs in requests from this machine, you create a workspace,
@@ -878,3 +1031,13 @@ cd web && npm run dev                  # http://localhost:4321 with hot reload; 
 - No quotas yet: workspaces per user, repositories per workspace and disk per workspace are unlimited. Removing a
   repository keeps its history and clone; there is no purge or workspace deletion yet.
 - The same repository imported into two workspaces is cloned and fetched twice.
+- gg-pulse has no analytics API yet, so its integration is a health check only. GG-Ops is read (project status and
+  task counts); nothing is written to it.
+- No MongoDB transactions (the default `mongo` service is a standalone server): changes that touch two documents are
+  ordered so a failure in between is harmless (an invite is used up before the membership is made, never the reverse).
+- Document search scans the workspace's documents with a regular expression: fine for hundreds of documents, a text
+  index or Atlas Search when there are thousands.
+- Rate limits count per client and per address; behind Caddy every request comes from Caddy's address unless uvicorn
+  is told to trust its forwarded headers, so the per-address limits are shared.
+- The legacy MCP token can still travel in a URL (for clients that only take one); turn it off once your agents use
+  API client tokens.

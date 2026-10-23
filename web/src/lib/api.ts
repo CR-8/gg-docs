@@ -42,6 +42,9 @@ export type Role = "owner" | "admin" | "member"
 export type Workspace = { id: number; name: string; role: Role }
 export type Me = {
   login: string
+  id: string // the portal's user id
+  github_id: number | null // GitHub's numeric id: what identifies the person
+  name: string | null
   avatar_url: string | null
   admin: boolean // owner or admin of the current workspace
   role: Role | null

@@ -14,10 +14,11 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
+from pymongo import UpdateMany
 
 from . import (BACKFILL_DAYS, DEFAULT_BRANCHES, GIT_URL, POLL_SECONDS, ROOT, SONAR_KEYS, SONAR_URL, WORKSPACE, db, llm,
                repo_dir, site_dir, work_dir, workspace, ws_dir)
-from .github import gh
+from .github import RateLimited, gh, repo_meta
 
 ZERO = "0" * 40
 WIN = os.name == "nt"
@@ -36,7 +37,7 @@ def now():
 
 def log(kind, detail, ok=True):
     print(f"[{kind}] {detail}", flush=True)
-    db.x("INSERT INTO events(at, kind, detail, ok) VALUES(?, ?, ?, ?)", now(), kind, str(detail)[:4000], int(ok))
+    db.events.insert({"at": now(), "kind": kind, "detail": str(detail)[:4000], "ok": int(ok)}, with_id=True)
 
 
 def enqueue(*job):
@@ -111,21 +112,21 @@ def person_for(email, ids=None):
     if m := NOREPLY.match(email):
         return m.group(1)
     if ids is None:
-        r = db.q("SELECT login FROM identities WHERE email=?", email)
-        return r[0]["login"] if r else email
+        r = db.identities.one({"email": email}, fields=["login"])
+        return r["login"] if r else email
     return ids.get(email, email)
 
 
 def remember_identities(rows):
     """rows of (email, login, name); then re-point anything still keyed by those emails."""
-    rows = [(e.lower(), login, name) for e, login, name in rows if e and login]
-    if not rows:
+    learned = {e.lower(): (login, name) for e, login, name in rows if e and login}
+    if not learned:
         return
-    db.xs("INSERT INTO identities(email, login, name) VALUES(?, ?, ?) "
-          "ON CONFLICT(email) DO UPDATE SET login=excluded.login, name=excluded.name", rows)
-    for table in ("commits", "findings", "breakages"):
-        db.x(f"UPDATE {table} SET person=(SELECT login FROM identities i WHERE i.email={table}.person) "
-             f"WHERE person LIKE '%@%' AND person IN (SELECT email FROM identities)")
+    db.identities.upsert_many([{"email": e, "login": login, "name": name} for e, (login, name) in learned.items()],
+                              ["email"])
+    for table in (db.commits, db.findings, db.breakages):
+        table.c.bulk_write([UpdateMany(table.scope({"person": e}), {"$set": {"person": login}})
+                            for e, (login, _) in learned.items()], ordered=False)
 
 
 def learn_identities(repo):
@@ -142,8 +143,8 @@ def learn_identities(repo):
 
 def ingest_commits(repo):
     since = (date.today() - timedelta(days=BACKFILL_DAYS)).isoformat()
-    known = {r["sha"] for r in db.q("SELECT sha FROM commits WHERE repo=?", repo)}
-    ids = {r["email"]: r["login"] for r in db.q("SELECT email, login FROM identities")}
+    known = {r["sha"] for r in db.commits.find({"repo": repo}, fields=["sha"])}
+    ids = {r["email"]: r["login"] for r in db.identities.find(fields=["email", "login"])}
     rows = []
     for rec in git(repo, "log", "--remotes=origin", f"--since={since}", f"--format={LOG_FMT}", "--numstat").split("\x1e")[1:]:
         head, *stats = rec.strip("\n").split("\n")
@@ -157,18 +158,17 @@ def ingest_commits(repo):
                 files += 1
                 if parts[0] != "-":  # binary files show "-"
                     adds, dels = adds + int(parts[0]), dels + int(parts[1])
-        rows.append((repo, sha, person_for(email, ids), name, email.lower(), at, subject, adds, dels, files,
-                     int(len(parents.split()) > 1)))
-    db.xs("INSERT OR IGNORE INTO commits(repo, sha, person, author_name, author_email, committed_at, message, "
-          "additions, deletions, files, is_merge) VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
+        rows.append({"repo": repo, "sha": sha, "person": person_for(email, ids), "author_name": name,
+                     "author_email": email.lower(), "committed_at": at, "message": subject, "additions": adds,
+                     "deletions": dels, "files": files, "is_merge": int(len(parents.split()) > 1), "on_default": 0})
+    db.commits.upsert_many(rows, ["repo", "sha"], only_new=True)
     on_default = git(repo, "rev-list", f"--since={since}", f"origin/{default_branch(repo)}").split()
-    db.xs("UPDATE commits SET on_default=1 WHERE repo=? AND sha=? AND on_default=0", [(repo, s) for s in on_default])
+    db.commits.update({"repo": repo, "sha": {"$in": on_default}, "on_default": 0}, {"$set": {"on_default": 1}})
     return len(rows)
 
 
 def record_push(repo, branch, before, after, pusher, pushed_at, forced, source):
-    if after == ZERO or db.q("SELECT 1 FROM pushes WHERE repo=? AND branch=? AND before=? AND after=?",
-                             repo, branch, before, after):
+    if after == ZERO or db.pushes.one({"repo": repo, "branch": branch, "before": before, "after": after}, fields=["id"]):
         return
     if not git_ok(repo, "cat-file", "-e", f"{after}^{{commit}}"):
         return  # not fetched yet; the next sync records it from the Events API
@@ -178,9 +178,9 @@ def record_push(repo, branch, before, after, pusher, pushed_at, forced, source):
             forced = not git_ok(repo, "merge-base", "--is-ancestor", before, after)
     else:  # new branch: the commits that are not on the default branch yet
         shas = git(repo, "rev-list", "--max-count=250", after, "--not", f"origin/{default_branch(repo)}").split()
-    pid = db.x("INSERT INTO pushes(repo, branch, before, after, pusher, pushed_at, forced, commits, source) "
-               "VALUES(?,?,?,?,?,?,?,?,?)", repo, branch, before, after, pusher, pushed_at, int(bool(forced)), len(shas), source)
-    db.xs("INSERT OR IGNORE INTO push_commits(push_id, sha) VALUES(?, ?)", [(pid, s) for s in shas])
+    db.pushes.insert({"repo": repo, "branch": branch, "before": before, "after": after, "pusher": pusher,
+                      "pushed_at": pushed_at, "forced": int(bool(forced)), "commits": len(shas), "source": source,
+                      "commit_shas": list(dict.fromkeys(shas))}, with_id=True)
 
 
 def ingest_push_events(repo):
@@ -216,10 +216,12 @@ def ingest_checks(repo):
     for sha in shas:
         for r in gh.paginate(f"/repos/{repo}/commits/{sha}/check-runs", key="check_runs", limit=300):
             if r["status"] == "completed":
-                rows.append((repo, sha, r["name"], r["conclusion"], r["completed_at"], r["html_url"]))
-    db.xs("INSERT INTO checks(repo, sha, name, conclusion, completed_at, url) VALUES(?,?,?,?,?,?) "
-          "ON CONFLICT(repo, sha, name) DO UPDATE SET conclusion=excluded.conclusion, "
-          "completed_at=excluded.completed_at, url=excluded.url WHERE excluded.completed_at >= checks.completed_at", rows)
+                rows.append({"repo": repo, "sha": sha, "name": r["name"], "conclusion": r["conclusion"],
+                             "completed_at": r["completed_at"], "url": r["html_url"]})
+    have = {(c["sha"], c["name"]): c["completed_at"] or "" for c in
+            db.checks.find({"repo": repo, "sha": {"$in": shas}}, fields=["sha", "name", "completed_at"])}
+    db.checks.upsert_many([r for r in rows if (r["completed_at"] or "") >= have.get((r["sha"], r["name"]), "")],
+                          ["repo", "sha", "name"])  # a re-run that finished later wins
     db.set_setting(f"checks_backfilled:{repo}", True)
     detect(repo, branch)
 
@@ -229,19 +231,21 @@ def detect(repo, branch, window=80):
     if not order:
         return
     results, done_at = defaultdict(dict), {}
-    marks = ",".join("?" * len(order))
-    for r in db.q(f"SELECT sha, name, conclusion, completed_at FROM checks WHERE repo=? AND sha IN ({marks})", repo, *order):
+    for r in db.checks.find({"repo": repo, "sha": {"$in": order}}, fields=["sha", "name", "conclusion", "completed_at"]):
         results[r["sha"]][r["name"]] = r["conclusion"]
         done_at[r["sha"], r["name"]] = r["completed_at"]
     for check, broken, good, fixed in detect_breakages(order, results):
-        who = db.q("SELECT person FROM commits WHERE repo=? AND sha=?", repo, broken)
-        pusher = db.q("SELECT p.pusher FROM pushes p JOIN push_commits pc ON pc.push_id=p.id "
-                      "WHERE p.repo=? AND pc.sha=? ORDER BY p.pushed_at LIMIT 1", repo, broken)
-        db.x("INSERT INTO breakages(repo, branch, check_name, broken_sha, last_good_sha, person, pusher, broken_at, "
-             "fixed_sha, fixed_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo, branch, check_name, broken_sha) DO UPDATE "
-             "SET fixed_sha=excluded.fixed_sha, fixed_at=excluded.fixed_at, pusher=COALESCE(breakages.pusher, excluded.pusher)",
-             repo, branch, check, broken, good, who[0]["person"] if who else None, pusher[0]["pusher"] if pusher else None,
-             done_at.get((broken, check)), fixed, done_at.get((fixed, check)) if fixed else None)
+        who = db.commits.one({"repo": repo, "sha": broken}, fields=["person"])
+        pushed = db.pushes.one({"repo": repo, "commit_shas": broken}, sort=[("pushed_at", 1)], fields=["pusher"])
+        pusher = pushed["pusher"] if pushed else None
+        key = {"repo": repo, "branch": branch, "check_name": check, "broken_sha": broken}
+        fix = {"fixed_sha": fixed, "fixed_at": done_at.get((fixed, check)) if fixed else None}
+        old = db.breakages.one(key, fields=["pusher"])
+        if old:
+            db.breakages.update(key, {"$set": {**fix, "pusher": old["pusher"] or pusher}})
+        else:
+            db.breakages.insert({**key, "last_good_sha": good, "person": who["person"] if who else None, "pusher": pusher,
+                                 "broken_at": done_at.get((broken, check)), **fix}, with_id=True)
 
 
 # ---------- jobs ----------
@@ -262,13 +266,13 @@ def check_head(repo):
 
 
 def save_pulls(repo, prs):
-    rows = [(repo, p["number"], p["title"], p["user"]["login"], "merged" if p.get("merged_at") else p["state"],
-             int(bool(p.get("draft"))), p["base"]["ref"], p["head"]["ref"], p["head"]["sha"], p["created_at"],
-             p["updated_at"], p.get("merged_at"), p["html_url"]) for p in prs]
-    db.xs("INSERT INTO pulls VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET "
-          "title=excluded.title, state=excluded.state, draft=excluded.draft, base=excluded.base, head=excluded.head, "
-          "head_sha=excluded.head_sha, updated_at=excluded.updated_at, merged_at=excluded.merged_at "
-          "WHERE excluded.updated_at >= pulls.updated_at", rows)
+    rows = [{"repo": repo, "number": p["number"], "title": p["title"], "author": p["user"]["login"],
+             "state": "merged" if p.get("merged_at") else p["state"], "draft": int(bool(p.get("draft"))),
+             "base": p["base"]["ref"], "head": p["head"]["ref"], "head_sha": p["head"]["sha"], "created_at": p["created_at"],
+             "updated_at": p["updated_at"], "merged_at": p.get("merged_at"), "url": p["html_url"]} for p in prs]
+    have = {r["number"]: r["updated_at"] or "" for r in
+            db.pulls.find({"repo": repo, "number": {"$in": [r["number"] for r in rows]}}, fields=["number", "updated_at"])}
+    db.pulls.upsert_many([r for r in rows if r["updated_at"] >= have.get(r["number"], "")], ["repo", "number"])
 
 
 def ingest_pulls(repo):
@@ -280,12 +284,36 @@ def ingest_pulls(repo):
 def poll_prs(repo):
     """Webhooks normally start PR reviews; this catches open PRs whose events never arrived
     (e.g. the portal's port is firewalled to office IPs)."""
-    for pr in db.q("SELECT number FROM pulls p WHERE repo=? AND state='open' AND draft=0 AND NOT EXISTS "
-                   "(SELECT 1 FROM reviews r WHERE r.repo=p.repo AND r.pr=p.number AND r.head_sha=p.head_sha)", repo):
-        enqueue("review_pr", repo, pr["number"])
+    reviewed = {(r["pr"], r["head_sha"]) for r in db.reviews.find({"repo": repo, "pr": {"$gt": 0}}, fields=["pr", "head_sha"])}
+    for pr in db.pulls.find({"repo": repo, "state": "open", "draft": 0}, fields=["number", "head_sha"]):
+        if (pr["number"], pr["head_sha"]) not in reviewed:
+            enqueue("review_pr", repo, pr["number"])
+
+
+def still_reachable(repo):
+    """Re-checks a connected repository with the App's own token on every sync: refreshes its metadata, and marks it
+    revoked (and skips it, keeping its data) when the App lost access. Installing the App again restores it."""
+    if not gh.enabled:
+        return True
+    try:
+        r = gh.get(f"/repos/{repo}")
+    except RateLimited:
+        raise
+    except (PermissionError, httpx.HTTPStatusError) as e:
+        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code not in (401, 403, 404):
+            raise
+        db.update_repo(WORKSPACE.get(), repo, {"status": "revoked", "checked_at": now(),
+                                               "status_detail": "The GitHub App can no longer read it."})
+        log("sync", f"{repo}: the GitHub App can no longer read it; not synced until access is restored", False)
+        return False
+    _defaults[repo] = r["default_branch"]
+    db.update_repo(WORKSPACE.get(), repo, {**repo_meta(r), "status": "active", "status_detail": None, "checked_at": now()})
+    return True
 
 
 def sync(repo):
+    if not still_reachable(repo):
+        return
     fetch(repo)
     n = ingest_commits(repo)
     if gh.enabled:
@@ -407,13 +435,14 @@ def sonar_snapshot():
             for facet in r.json().get("facets", []):
                 if facet["property"] == "author":
                     rows += [(today, repo, v["val"].lower(), quality.lower(), v["count"]) for v in facet["values"]]
-    db.xs("INSERT OR REPLACE INTO sonar_issues(taken_on, repo, author_email, quality, count) VALUES(?,?,?,?,?)", rows)
+    db.sonar_issues.upsert_many([{"taken_on": t, "repo": r, "author_email": a, "quality": q, "count": n}
+                                 for t, r, a, q, n in rows], ["taken_on", "repo", "author_email", "quality"])
 
 
 def handle_webhook(event, payload):
     """One GitHub App delivers the webhooks of every tenant: each workspace that imported the repository gets it."""
     repo = (payload.get("repository") or {}).get("full_name")
-    targets = db.cq("SELECT workspace_id, repo FROM repos WHERE repo=?", repo) if repo else []
+    targets = list(db.repo_links.find({"repo_lower": repo.lower()}, {"workspace_id": 1, "repo": 1})) if repo else []
     results = set()
     for t in targets:
         with workspace(t["workspace_id"]):
@@ -466,15 +495,17 @@ def poller():
     last_snapshot = 0.0
     while True:
         snapshot = time.time() - last_snapshot > 3600
-        for w in db.cq("SELECT id FROM workspaces"):
-            with workspace(w["id"]):
+        for w in db.workspaces.find({}, {"_id": 1}):
+            with workspace(w["_id"]):
                 for repo in db.repos():
                     enqueue("sync", repo)
                 if views():
                     enqueue("sonar")
                     if snapshot:
                         enqueue("sonar_snapshot")
-                db.x("DELETE FROM events WHERE id < (SELECT MAX(id) - 5000 FROM events)")
+                last = db.events.one(sort=[("id", -1)], fields=["id"])
+                if last:
+                    db.events.delete({"id": {"$lt": last["id"] - 5000}})
         if snapshot:
             last_snapshot = time.time()
         time.sleep(POLL_SECONDS)
@@ -482,8 +513,8 @@ def poller():
 
 def start():
     from . import docgen
-    for w in db.cq("SELECT id FROM workspaces"):
-        with workspace(w["id"]):
+    for w in db.workspaces.find({}, {"_id": 1}):
+        with workspace(w["_id"]):
             if views() and not (site_dir() / "overview.json").exists() \
                     and all((repo_dir(r) / ".git").exists() for r in views()):
                 enqueue("rebuild")  # views built before the Overview page read overview.json

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
 import time
 from datetime import datetime
 from urllib.parse import urlencode
@@ -14,6 +15,33 @@ import jwt
 
 API = "https://api.github.com"
 REPO_PATH = re.compile(r"/repos/([^/]+/[^/?]+)")
+
+
+class RateLimited(Exception):
+    """GitHub's rate limit is used up; retry_after is in seconds."""
+
+    def __init__(self, retry_after):
+        super().__init__(f"GitHub's API rate limit is used up; try again in {retry_after} s")
+        self.retry_after = retry_after
+
+
+def pkce():
+    """(verifier, S256 challenge) for the OAuth code exchange (RFC 7636)."""
+    verifier = secrets.token_urlsafe(48)
+    return verifier, base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+
+
+def repo_meta(r, login=None):
+    """What the portal shows and keeps about a repository; `access` (with the user's login) tells owned repositories
+    from organization ones and ones the user collaborates on."""
+    owner = r["owner"]
+    out = {"github_id": r["id"], "owner": owner["login"], "description": r.get("description"),
+           "visibility": r.get("visibility") or ("private" if r.get("private") else "public"),
+           "private": bool(r.get("private")), "default_branch": r.get("default_branch"), "html_url": r.get("html_url")}
+    if login is not None:
+        out["access"] = ("owner" if owner["login"].lower() == login.lower() else
+                         "organization" if owner.get("type") == "Organization" else "collaborator")
+    return out
 
 
 def verify_signature(secret, body, header):
@@ -95,6 +123,9 @@ class GitHub:
     def request(self, method, path, check=True, token=None, **kw):
         """token: a user's token; by default the installation token of the repository in the path."""
         r = self.http.request(method, path, headers={"Authorization": f"Bearer {self._token_for(path, token)}"}, **kw)
+        if r.status_code in (403, 429) and (r.headers.get("retry-after") or r.headers.get("x-ratelimit-remaining") == "0"):
+            reset = int(r.headers.get("x-ratelimit-reset") or 0)
+            raise RateLimited(int(r.headers.get("retry-after") or max(1, reset - int(time.time()))))
         if check:
             r.raise_for_status()
         return r
@@ -130,20 +161,24 @@ class GitHub:
             self._app_url = r.json()["html_url"]
         return f"{self._app_url}/installations/new"
 
-    def user_repos(self, token):
-        """Repositories this user can read through the App's installations: what Import lists."""
-        out = []
+    def user_repos(self, token, login):
+        """Repositories this user can read through the App's installations (every page of each): what Import lists.
+        A repository two installations cover is listed once."""
+        out = {}
         for inst in self.paginate("/user/installations", key="installations", limit=100, token=token):
-            out += [{"repo": r["full_name"], "private": r["private"], "pushed_at": r.get("pushed_at")}
-                    for r in self.paginate(f"/user/installations/{inst['id']}/repositories", key="repositories",
-                                           limit=500, token=token)]
-        return out
+            for r in self.paginate(f"/user/installations/{inst['id']}/repositories", key="repositories",
+                                   limit=2000, token=token):
+                out[r["id"]] = {"repo": r["full_name"], "pushed_at": r.get("pushed_at"), **repo_meta(r, login)}
+        return list(out.values())
 
     # ---- "Sign in with GitHub" (the App's user-authorization flow) ----
 
-    def oauth_url(self, state, redirect_uri):
+    def oauth_url(self, state, redirect_uri, challenge):
+        """No scope parameter: a GitHub App's user token carries the App's permissions, limited to the repositories
+        where the App is installed and the user has access. Installing the App is the separate consent step."""
         return "https://github.com/login/oauth/authorize?" + urlencode(
-            {"client_id": self.client_id, "redirect_uri": redirect_uri, "state": state})
+            {"client_id": self.client_id, "redirect_uri": redirect_uri, "state": state,
+             "code_challenge": challenge, "code_challenge_method": "S256"})
 
     def _user_token(self, **grant):
         r = httpx.post("https://github.com/login/oauth/access_token", timeout=30, headers={"Accept": "application/json"},
@@ -156,14 +191,22 @@ class GitHub:
         return {"token": t["access_token"], "refresh_token": t.get("refresh_token"),
                 "token_expires": time.time() + t["expires_in"] if t.get("expires_in") else None}
 
-    def oauth_login(self, code, redirect_uri):
-        """The signed-in user's profile and tokens."""
-        tokens = self._user_token(code=code, redirect_uri=redirect_uri)
+    def oauth_login(self, code, redirect_uri, verifier):
+        """The signed-in user's profile (github_id: GitHub's immutable numeric id) and tokens."""
+        tokens = self._user_token(code=code, redirect_uri=redirect_uri, code_verifier=verifier)
         me = self.get("/user", token=tokens["token"])
-        return {"login": me["login"], "name": me.get("name"), "avatar_url": me.get("avatar_url"), **tokens}
+        return {"github_id": me["id"], "login": me["login"], "name": me.get("name"), "avatar_url": me.get("avatar_url"),
+                **tokens}
 
     def refresh(self, refresh_token):
         return self._user_token(grant_type="refresh_token", refresh_token=refresh_token)
+
+    def revoke_grant(self, token):
+        """Revokes the user's authorization of the App on GitHub (and with it every token it issued them)."""
+        r = httpx.request("DELETE", f"{API}/applications/{self.client_id}/grant", auth=(self.client_id, self.client_secret),
+                          json={"access_token": token}, timeout=30,
+                          headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+        return r.status_code in (204, 404)  # 404: already revoked
 
 
 gh = GitHub()

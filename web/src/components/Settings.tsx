@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { Check, Copy as CopyIcon, Cpu, GitBranch, Hammer, Mail, Plug, Plus, RefreshCw, Users, X } from "lucide-react"
+import { Cpu, Hammer, Mail, Plug, RefreshCw, Users, X } from "lucide-react"
 import { bytes, post, useApi, useMe, type Role } from "@/lib/api"
-import { Choice, DataTable, Loading, Section, Tag, Time } from "@/components/common"
+import { Choice, DataTable, Field, Loading, Note, Section, Snippet, Tag, Time } from "@/components/common"
+import { ApiClients, ConnectedRepos, GitHubAccount, Services } from "@/components/Integrations"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -13,14 +14,6 @@ import { Spinner } from "@/components/kibo-ui/spinner"
 type Provider = "local" | "anthropic" | "openai"
 type LocalModel = { name: string; size: number; params?: string; quant?: string }
 const DEFAULT_MODEL = { anthropic: "claude-opus-5-5", openai: "" }
-
-const Field = ({ id, label, hint, children }: { id: string; label: string; hint?: ReactNode; children: ReactNode }) => (
-  <div className="grid gap-1.5">
-    <Label htmlFor={id}>{label}</Label>
-    {children}
-    {hint && <p className="text-muted-foreground text-xs text-pretty">{hint}</p>}
-  </div>
-)
 
 // OpenAI-compatible endpoints people use most; one click fills the base URL
 const PRESETS: [string, string][] = [
@@ -37,8 +30,6 @@ function ModelInput(props: { id: string; value: string; onChange: (v: string) =>
     </div>
   )
 }
-
-const Note = ({ children }: { children: ReactNode }) => <span className="text-muted-foreground text-sm">{children}</span>
 
 function StatusPanel({ admin }: { admin: boolean }) {
   const s = useApi("/api/summary")
@@ -87,33 +78,15 @@ function StatusPanel({ admin }: { admin: boolean }) {
   )
 }
 
-function Copy({ text }: { text: string }) {
-  const [done, setDone] = useState(false)
-  return (
-    <Button type="button" variant="ghost" size="icon-xs" aria-label="Copy" onClick={() =>
-      navigator.clipboard.writeText(text).then(() => {
-        setDone(true)
-        setTimeout(() => setDone(false), 1500)
-      })}>
-      {done ? <Check /> : <CopyIcon />}
-    </Button>
-  )
-}
+const MCP_TOOLS = ["pull_requests", "pull_request", "recent_pushes", "docs", "query", "commit_diff", "code_graph", "architecture", "sonar_issues"]
 
-const Snippet = ({ label, text }: { label: ReactNode; text: string }) => (
-  <div>
-    <div className="text-muted-foreground mb-1 text-xs">{label}</div>
-    <div className="bg-muted flex items-start gap-2 rounded-lg py-2 pr-2 pl-3">
-      <code className="flex-1 font-mono text-xs break-all whitespace-pre-wrap">{text}</code>
-      <Copy text={text} />
-    </div>
-  </div>
-)
-
-const MCP_TOOLS = ["pull_requests", "pull_request", "recent_pushes", "docs", "sql", "commit_diff", "code_graph", "architecture", "sonar_issues"]
+type McpInfo = { url: string; token_url: string | null; token: string | null; legacy: boolean }
 
 function Mcp({ admin }: { admin: boolean }) {
-  const m = useApi<{ url: string; token_url: string; token: string }>(admin ? "/api/settings/mcp" : null)
+  const m = useApi<McpInfo>(admin ? "/api/settings/mcp" : null)
+  const [msg, setMsg] = useState("")
+  const act = (fn: () => Promise<unknown>, done: string) =>
+    fn().then(() => { setMsg(done); m.reload() }, (e) => setMsg(e.message))
   return (
     <Section
       title={<span className="flex items-center gap-2"><Plug className="size-4" /> Connect a coding agent (MCP)</span>}
@@ -123,52 +96,32 @@ function Mcp({ admin }: { admin: boolean }) {
         <Note>An owner or admin can copy the connection details from this page.</Note>
       ) : !m.data ? <Loading rows={3} /> : (
         <div className="space-y-4">
-          <Snippet label="Claude Code" text={`claude mcp add --transport http genegenius ${m.data.url} --header "Authorization: Bearer ${m.data.token}"`} />
-          <Snippet label="Codex CLI" text={`codex mcp add genegenius --url ${m.data.token_url}`} />
-          <Snippet
-            label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
-            text={m.data.token_url}
-          />
+          <p className="text-muted-foreground text-sm text-pretty">
+            Preferred: an <b>API client</b> with the <code className="font-mono text-xs">mcp:read</code> scope (below) gets a one-hour
+            token from <code className="font-mono text-xs">POST /api/v1/auth/token</code>; send it as <code className="font-mono text-xs">Authorization: Bearer</code>.
+          </p>
+          {m.data.token ? (
+            <>
+              <Snippet label="Claude Code (workspace token)" text={`claude mcp add --transport http genegenius ${m.data.url} --header "Authorization: Bearer ${m.data.token}"`} />
+              <Snippet label="Codex CLI" text={`codex mcp add genegenius --url ${m.data.token_url}`} />
+              <Snippet
+                label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
+                text={m.data.token_url!}
+              />
+            </>
+          ) : <Note>The workspace token is off: agents connect with an API client's token only.</Note>}
+          <div className="flex flex-wrap items-center gap-2">
+            {m.data.legacy && (
+              <Button size="sm" variant="outline" onClick={() => confirm("Make a new workspace token? Agents using the old one stop working.") &&
+                act(() => post("/api/settings/mcp/rotate"), "New token made; the old one no longer works.")}><RefreshCw /> New token</Button>
+            )}
+            <Button size="sm" variant="ghost" onClick={() => act(() => post("/api/settings/mcp", { legacy: !m.data!.legacy }, "PUT"),
+              m.data!.legacy ? "Workspace token turned off." : "Workspace token turned on.")}>
+              {m.data.legacy ? "Turn the workspace token off" : "Turn the workspace token on"}
+            </Button>
+            {msg && <Note>{msg}</Note>}
+          </div>
           <div className="flex flex-wrap gap-1">{MCP_TOOLS.map((t) => <Tag key={t}>{t}</Tag>)}</div>
-        </div>
-      )}
-    </Section>
-  )
-}
-
-function Repositories({ admin }: { admin: boolean }) {
-  const s = useApi("/api/summary")
-  const [msg, setMsg] = useState("")
-  const remove = async (r: string) => {
-    if (!confirm(`Stop syncing ${r}? Its history stays; importing it again picks it back up.`)) return
-    try {
-      await post("/api/admin/remove_repo", { repo: r })
-      setMsg(`Removed ${r}.`)
-      s.reload()
-    } catch (e: any) {
-      setMsg(e.message)
-    }
-  }
-  return (
-    <Section title={<span className="flex items-center gap-2"><GitBranch className="size-4" /> Repositories</span>}
-      description="Every repository here is synced (webhooks, plus a poll every few minutes), reviewed and documented."
-      action={admin && <Button size="sm" variant="outline" asChild><a href="/new/"><Plus /> Import</a></Button>}>
-      {!s.data ? <Loading rows={2} /> : (
-        <div className="space-y-3">
-          {s.data.repos.length ? (
-            <div className="divide-y rounded-lg border">
-              {(s.data.repos as string[]).map((r) => (
-                <div key={r} className="flex items-center gap-2 px-3 py-2 text-sm">
-                  <span className="font-mono text-xs">{r}</span>
-                  <a className="link ml-auto text-xs" href={`/docs/#${r.split("/")[1]}/overview`}>docs</a>
-                  {admin && (
-                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Remove ${r}`} onClick={() => remove(r)}><X /></Button>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : <Note>None yet. {admin ? <a className="link" href="/new/">Import the first one.</a> : "An owner or admin imports them."}</Note>}
-          {msg && <Note>{msg}</Note>}
         </div>
       )}
     </Section>
@@ -182,7 +135,7 @@ const ROLE_HINT: Record<Role, string> = {
 }
 
 type Team = {
-  members: { login: string; role: Role; name: string | null; avatar_url: string | null; joined_at: string }[]
+  members: { login: string; role: Role; name: string | null; avatar_url: string | null; joined_at: string; pending: boolean }[]
   invites: { id: number; email: string; role: Role; invited_by: string; created_at: string }[]
   email: boolean
 }
@@ -238,6 +191,7 @@ function TeamPanel({ me }: { me: NonNullable<ReturnType<typeof useMe>> }) {
                 )}
                 <span className="truncate font-medium">{m.login}</span>
                 {m.name && <span className="text-muted-foreground hidden truncate text-xs sm:inline">{m.name}</span>}
+                {m.pending && <span title="Joins when this GitHub account first signs in"><Tag>not signed in yet</Tag></span>}
                 <span className="ml-auto flex items-center gap-1">
                   {me.admin && (owner || m.role !== "owner") ? (
                     <Choice label={`Role of ${m.login}`} value={m.role} className="w-28"
@@ -508,8 +462,11 @@ export function Settings() {
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
         {me && <TeamPanel me={me} />}
-        <Repositories admin={admin} />
+        {me?.workspace && <ConnectedRepos admin={admin} workspace={me.workspace.id} />}
       </div>
+      {me && <GitHubAccount me={me} />}
+      <Services admin={admin} />
+      <ApiClients admin={admin} />
       <Mcp admin={admin} />
       <Jobs />
     </div>

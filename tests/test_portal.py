@@ -1,41 +1,51 @@
-"""Checks for the logic that is easy to get subtly wrong. Run: python -m pytest tests"""
+"""Checks for the logic that is easy to get subtly wrong. Run: python -m pytest tests (needs a MongoDB, conftest.py)"""
+import base64
 import hashlib
 import hmac
-import os
-import tempfile
+import json
 from urllib.parse import parse_qs, urlsplit
 
-os.environ["DATA_DIR"] = tempfile.mkdtemp()  # before importing portal, so the DB lands in a scratch dir
-os.environ.update(DISABLE_WORKER="1", GITHUB_CLIENT_ID="cid", GITHUB_CLIENT_SECRET="csecret")
-
-from portal import WORKSPACE, db  # noqa: E402
-from portal.chat import tool_sql  # noqa: E402
-from portal.github import verify_signature  # noqa: E402
-from portal.llm import anthropic_tools, openai_tools, parse_args  # noqa: E402
-from portal.review import annotate, clean, make_chunks, parse_json, split_diff  # noqa: E402
-from portal.sync import detect_breakages, person_for  # noqa: E402
+from portal import WORKSPACE, db, secret
+from portal.chat import tool_query
+from portal.github import verify_signature
+from portal.llm import anthropic_tools, openai_tools, parse_args
+from portal.review import annotate, clean, make_chunks, parse_json, split_diff
+from portal.sync import detect_breakages, person_for
 
 db.init()
-WS = db.create_workspace("Acme", "alice")
+GITHUB_IDS = {"alice": 1}
+ALICE = db.sign_in({"github_id": 1, "login": "alice", "name": "Alice", "avatar_url": None})
+WS = db.create_workspace("Acme", ALICE)
 WORKSPACE.set(WS)  # the tests below run inside Acme, like a request or a job would
 
 
-def sign_in(client, login, next="/"):
-    """The GitHub sign-in round trip, with GitHub itself stubbed out. Returns where it lands."""
+def sign_in(client, login, next="/", github_id=None):
+    """The GitHub sign-in round trip, with GitHub itself stubbed out. Returns where it lands. Each login is its own
+    GitHub account (a stable numeric id) unless github_id says otherwise."""
     from portal.github import gh
+    gid = github_id or GITHUB_IDS.setdefault(login, 100 + len(GITHUB_IDS))
     to_github = client.get("/auth/github", params={"next": next}, follow_redirects=False).headers["location"]
-    state = parse_qs(urlsplit(to_github).query)["state"][0]
-    saved = gh.oauth_login
-    gh.oauth_login = lambda code, uri: {"login": login, "name": login.title(), "avatar_url": None,
-                                        "token": f"t-{login}", "refresh_token": None, "token_expires": None}
+    q = parse_qs(urlsplit(to_github).query)
+    seen = {}
+
+    def oauth_login(code, uri, verifier):
+        seen["verifier"] = verifier
+        return {"github_id": gid, "login": login, "name": login.title(), "avatar_url": None, "token": f"t-{login}",
+                "refresh_token": None, "token_expires": None}
+
+    saved, gh.oauth_login = gh.oauth_login, oauth_login
     try:
-        return client.get(f"/auth/callback?code=x&state={state}", follow_redirects=False).headers["location"]
+        where = client.get(f"/auth/callback?code=x&state={q['state'][0]}", follow_redirects=False).headers["location"]
     finally:
         gh.oauth_login = saved
+    if seen:  # PKCE: GitHub gets the challenge, the exchange sends its verifier
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(seen["verifier"].encode()).digest()).rstrip(b"=").decode()
+        assert q["code_challenge"] == [challenge] and q["code_challenge_method"] == ["S256"]
+    return where
 
 
 def mcp_token(ws):
-    return db.cq("SELECT mcp_token FROM workspaces WHERE id=?", ws)[0]["mcp_token"]
+    return secret.unseal(db.workspaces.find_one({"_id": ws})["mcp_token"])
 
 
 DIFF = """diff --git a/app/x.py b/app/x.py
@@ -114,23 +124,30 @@ def test_breakage_attribution():
 
 
 def test_llm_tool_formats():
-    tool = {"name": "sql", "description": "d", "parameters": {"type": "object", "properties": {}}}
-    assert anthropic_tools([tool]) == [{"name": "sql", "description": "d", "input_schema": tool["parameters"]}]
+    tool = {"name": "query", "description": "d", "parameters": {"type": "object", "properties": {}}}
+    assert anthropic_tools([tool]) == [{"name": "query", "description": "d", "input_schema": tool["parameters"]}]
     assert openai_tools([tool]) == [{"type": "function", "function": tool}]
     assert parse_args('{"query": "select 1"}') == {"query": "select 1"}
     assert parse_args("{not json") == {} and parse_args("[1]") == {}
 
 
-def test_people_and_readonly_sql():
-    db.init()
+def test_people_and_readonly_query():
     assert person_for("12345+octo@users.noreply.github.com") == "octo"
-    db.x("INSERT INTO identities(email, login) VALUES('a@x.com', 'alice')")
+    db.identities.insert({"email": "a@x.com", "login": "alice", "name": None})
     assert person_for("A@X.com") == "alice" and person_for("b@x.com") == "b@x.com"
-    assert '"rows": [["alice"]]' in tool_sql("SELECT login FROM identities")
-    assert "Only one SELECT" in tool_sql("DELETE FROM identities")
-    assert "Only one SELECT" in tool_sql("SELECT 1; DELETE FROM identities")
-    assert "SQL error" in tool_sql("WITH x AS (SELECT 1) DELETE FROM identities")  # read-only connection refuses
-    assert db.q("SELECT COUNT(*) n FROM identities")[0]["n"] == 1
+    out = json.loads(tool_query("identities", [{"$project": {"login": 1}}]))
+    assert out == {"rows": [{"login": "alice"}], "truncated": False}
+    assert json.loads(tool_query("identities", '[{"$count": "n"}]'))["rows"] == [{"n": 1}]  # a JSON string works too
+    for bad in ([{"$out": "x"}], [{"$merge": {"into": "x"}}], [{"$match": {"$where": "true"}}],
+                [{"$unionWith": "settings"}], [{"$facet": {"a": [{"$lookup": {"from": "users"}}]}}],
+                [{"$group": {"_id": None, "x": {"$accumulator": {}}}}]):
+        assert "Not allowed" in tool_query("identities", bad), bad
+    assert "Stage $collStats is not allowed" in tool_query("identities", [{"$collStats": {}}])
+    assert "Unknown collection" in tool_query("settings") and "Unknown collection" in tool_query("users")
+    assert "$lookup takes" in tool_query("identities", [{"$lookup": {"from": "users", "localField": "login",
+                                                                      "foreignField": "login", "as": "u"}}])
+    assert "$lookup takes" in tool_query("identities", [{"$lookup": {"from": "commits", "pipeline": [], "as": "u"}}])
+    assert db.identities.count() == 1
 
 
 def test_repository_urls():
@@ -151,8 +168,8 @@ def test_workspaces_invites_roles_and_isolation(monkeypatch):
     from portal.main import app
     sent = []
     monkeypatch.setattr(mail, "send_invite", lambda to, ws, who, link, days: sent.append((to, ws, who, link)) or True)
-    db.x("INSERT OR IGNORE INTO commits(repo, sha, person, committed_at, additions, is_merge) "
-         "VALUES('acme/app', 'c0ffee', 'alice', '2099-01-01', 5, 0)")
+    db.commits.upsert_many([{"repo": "acme/app", "sha": "c0ffee", "person": "alice", "committed_at": "2099-01-01",
+                             "additions": 5, "is_merge": 0}], ["repo", "sha"], only_new=True)
     with TestClient(app) as alice, TestClient(app) as bob, TestClient(app) as eve:
         assert alice.get("/api/summary").status_code == 401
         assert alice.get("/people/", follow_redirects=False).headers["location"].startswith("/auth/login?next=")
@@ -187,6 +204,7 @@ def test_workspaces_invites_roles_and_isolation(monkeypatch):
         assert eve.post(f"/api/invites/{token}/accept").status_code == 404
         assert eve.post("/api/invites/made-up/accept").status_code == 404
         assert alice.get("/api/workspace/members").json()["invites"] == []
+        assert not db.invites.find_one({"token_hash": token})  # stored hashed only
 
         # members read everything and manage nothing
         assert bob.get("/api/summary").status_code == 200
@@ -203,7 +221,11 @@ def test_workspaces_invites_roles_and_isolation(monkeypatch):
         for url in ("http://169.254.169.254/latest", "http://127.0.0.1:9000/v1", "http://10.0.0.5/v1"):
             assert alice.put("/api/settings", json={"llm_kind": "openai", "llm_base_url": url}).status_code == 400, url
         assert alice.put("/api/settings", json={"llm_kind": "openai", "llm_base_url": "http://llm:11434/v1"}).status_code == 200
-        alice.put("/api/settings", json={"llm_kind": "anthropic", "llm_base_url": ""})
+        alice.put("/api/settings", json={"llm_kind": "anthropic", "llm_base_url": "", "llm_api_key": "sk-ant-secret"})
+        assert alice.get("/api/settings").json()["llm_api_key"] == "saved, ends in cret"
+        raw = db.settings.c.find_one({"workspace_id": WS, "key": "llm_api_key"})["value"]
+        assert raw.startswith("v1:") and "sk-ant" not in raw  # encrypted at rest
+        db.del_setting("llm_api_key")  # (a blank field keeps it) no model for the tests below
 
         # import (no GitHub configured here, so no access check): a URL in, a repository synced in this workspace
         assert alice.post("/api/import", json={"url": "https://github.com/acme/extra.git"}).json()["repo"] == "acme/extra"
@@ -212,16 +234,21 @@ def test_workspaces_invites_roles_and_isolation(monkeypatch):
         for bad in ("../etc", "acme/..", "acme", "https://gitlab.com/acme/x"):
             assert alice.post("/api/import", json={"url": bad}).status_code == 400, bad
 
-        # another tenant sees none of it, over the API or MCP, and can't switch in
+        # another tenant sees none of it, over the API or MCP (joins included), and can't switch in
         eve_ws = eve.post("/api/workspaces", json={"name": "  Eve\nCorp "}).json()
         assert eve_ws["name"] == "Eve Corp" and eve.get("/api/me").json()["role"] == "owner"
         assert eve.post(f"/api/workspaces/{WS}/switch").status_code == 403
         assert eve.get("/api/summary").json()["repos"] == [] and eve.get("/api/people").json() == []
         assert [p["person"] for p in alice.get("/api/people").json()] == ["alice"]
         count = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                 "params": {"name": "sql", "arguments": {"query": "SELECT COUNT(*) FROM commits"}}}
-        text = lambda ws: eve.post(f"/mcp/{mcp_token(ws)}", json=count).json()["result"]["content"][0]["text"]
-        assert '"rows": [[1]]' in text(WS) and '"rows": [[0]]' in text(eve_ws["id"])
+                 "params": {"name": "query", "arguments": {"collection": "commits", "pipeline": [{"$count": "n"}]}}}
+        text = lambda ws, body=count: eve.post(f"/mcp/{mcp_token(ws)}", json=body).json()["result"]["content"][0]["text"]
+        assert json.loads(text(WS))["rows"] == [{"n": 1}] and json.loads(text(eve_ws["id"]))["rows"] == []
+        with __import__("portal").workspace(eve_ws["id"]):
+            db.identities.insert({"email": "c0ffee", "login": "x", "name": None})
+        join = {**count, "params": {"name": "query", "arguments": {"collection": "identities", "pipeline": [
+            {"$lookup": {"from": "commits", "localField": "email", "foreignField": "sha", "as": "found"}}]}}}
+        assert json.loads(text(eve_ws["id"], join))["rows"][0]["found"] == []  # Acme's commit c0ffee stays invisible
 
         alice.post("/api/admin/remove_repo", json={"repo": "acme/extra"})
         assert "acme/extra" not in alice.get("/api/summary").json()["repos"]
@@ -241,8 +268,10 @@ def test_import_goes_by_the_users_own_github_access(monkeypatch):
         def __init__(self, repo):
             self.repo, self.status_code = repo, 200 if repo in readable else 404
 
-        def json(self):
-            return {"full_name": self.repo.replace("acme", "Acme")}  # GitHub's spelling wins
+        def json(self):  # GitHub's spelling wins
+            return {"id": 42, "full_name": self.repo.replace("acme", "Acme"), "private": True, "visibility": "private",
+                    "owner": {"login": "Acme", "type": "Organization"}, "default_branch": "main", "description": "Site",
+                    "html_url": f"https://github.com/{self.repo}"}
 
     monkeypatch.setattr(GitHub, "mode", property(lambda self: "app"))
     monkeypatch.setattr(gh, "request", lambda method, path, check=True, token=None, **kw:
@@ -255,35 +284,10 @@ def test_import_goes_by_the_users_own_github_access(monkeypatch):
         assert r.status_code == 400 and r.json()["install_url"].endswith("/installations/new")
         assert c.post("/api/import", json={"url": "acme/noapp"}).json()["install_url"]  # readable, but no App
         assert c.post("/api/import", json={"url": "github.com/acme/site"}).json()["repo"] == "Acme/site"
-    assert set(tokens) == {"t-alice"}
-    db.cx("DELETE FROM repos WHERE repo='Acme/site'")
-
-
-def test_single_tenant_install_becomes_workspace_one(tmp_path, monkeypatch):
-    import sqlite3
-    import portal
-    from portal import workspace
-    for module in (portal, db):
-        monkeypatch.setattr(module, "DATA", tmp_path)
-    monkeypatch.setattr(db, "CONTROL", tmp_path / "control.db")
-    monkeypatch.setattr(db, "ADMINS", {"lead"})
-    old = sqlite3.connect(tmp_path / "portal.db")
-    old.executescript(db.SCHEMA)
-    old.execute("""INSERT INTO settings VALUES('extra_repos', '["acme/extra"]')""")
-    old.execute("INSERT INTO commits(repo, sha) VALUES('acme/extra', 'abc')")
-    old.commit()
-    old.close()
-    (tmp_path / "repos" / "Genegenius-backend").mkdir(parents=True)
-    db.init()
-    db.init()  # and again on the next start: nothing more happens
-    assert db.cq("SELECT id, name FROM workspaces") == [{"id": 1, "name": "GeneGeniusinc"}]
-    assert db.cq("SELECT login, role FROM members") == [{"login": "lead", "role": "owner"}]
-    assert not (tmp_path / "portal.db").exists() and (tmp_path / "workspaces/1/repos/Genegenius-backend").is_dir()
-    with workspace(1):
-        assert db.repos() == ["GeneGeniusinc/Genegenius-backend", "GeneGeniusinc/Genegenius-phase-1", "acme/extra"]
-        assert db.q("SELECT sha FROM commits") == [{"sha": "abc"}]
-        assert db.setting("views") == {"backend": "GeneGeniusinc/Genegenius-backend",
-                                       "frontend": "GeneGeniusinc/Genegenius-phase-1"}
+    assert set(tokens) == {"t-alice"}  # the token stored (encrypted) at sign-in
+    link = db.repo_links.find_one({"workspace_id": WS, "repo_lower": "acme/site"})
+    assert (link["github_id"], link["visibility"], link["default_branch"], link["status"]) == (42, "private", "main", "active")
+    db.repo_links.delete_many({"repo_lower": "acme/site"})
 
 
 def test_pull_request_webhook_feeds_the_tools_and_mcp():
@@ -293,7 +297,8 @@ def test_pull_request_webhook_feeds_the_tools_and_mcp():
     from portal.main import app
     from portal.sync import handle_webhook
     db.add_repo(WS, "acme/app", "alice")
-    other = db.create_workspace("Other", "dave")  # imported the same repository: gets the same webhooks
+    dave = db.sign_in({"github_id": 9, "login": "dave"})
+    other = db.create_workspace("Other", dave)  # imported the same repository: gets the same webhooks
     db.add_repo(other, "acme/app", "dave")
     pr = {"number": 7, "title": "Add VCF parser", "user": {"login": "octo"}, "state": "open", "draft": False,
           "base": {"ref": "main"}, "head": {"ref": "feat/vcf", "sha": "a" * 40}, "created_at": "2026-10-01T00:00:00Z",
@@ -301,6 +306,8 @@ def test_pull_request_webhook_feeds_the_tools_and_mcp():
     event = {"action": "edited", "repository": {"full_name": "Acme/App"}, "number": 7, "pull_request": pr}
     assert handle_webhook("pull_request", event) == "queued"
     assert handle_webhook("pull_request", {**event, "repository": {"full_name": "acme/unknown"}}) == "ignored"
+    stale = {**pr, "title": "Old title", "updated_at": "2026-09-01T00:00:00Z"}  # an older delivery doesn't win
+    handle_webhook("pull_request", {**event, "pull_request": stale})
     assert '"title": "Add VCF parser"' in run_tool("pull_requests", {})
     with workspace(other):
         assert '"repo": "acme/app"' in run_tool("pull_requests", {})
@@ -312,9 +319,10 @@ def test_pull_request_webhook_feeds_the_tools_and_mcp():
         init = rpc(c, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                        "params": {"protocolVersion": "2025-06-18", "capabilities": {}}}, **auth).json()["result"]
         assert init["protocolVersion"] == "2025-06-18" and "tools" in init["capabilities"]
+        assert "pushes {id, repo" in init["instructions"]  # the collections, described for the agent
         assert rpc(c, {"jsonrpc": "2.0", "method": "notifications/initialized"}, **auth).status_code == 202
         tools = rpc(c, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, **auth).json()["result"]["tools"]
-        assert {"pull_requests", "pull_request", "recent_pushes", "docs", "sql"} <= {t["name"] for t in tools}
+        assert {"pull_requests", "pull_request", "recent_pushes", "docs", "query"} <= {t["name"] for t in tools}
         call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "pull_request", "arguments": {"repo": "acme/app", "number": 7}}}
         out = c.post(f"/mcp/{mcp_token(WS)}", json=call).json()["result"]  # token in the URL, for ChatGPT and co
@@ -357,25 +365,30 @@ def test_generated_docs_follow_the_code():
     assert ["GET", "/v1/sum", "total", "app/api/routes.py"] in a["components"]["api"]["routes"]
     assert ["api", "services", 1] in a["edges"] and "API_TOKEN" in a["env"] and "motor" in a["externals"]
     docgen.run(repo)
-    slugs = {r["slug"] for r in db.q("SELECT slug FROM docs WHERE repo=?", repo)}
+    slugs = {r["slug"] for r in db.docs.find({"repo": repo}, fields=["slug"])}
     assert {"overview", "architecture", "data-flow", "system-design", "api", "modules/api", "modules/services"} <= slugs
-    assert "```mermaid" in db.q("SELECT content FROM docs WHERE repo=? AND slug='architecture'", repo)[0]["content"]
-    versions = lambda: db.q("SELECT COUNT(*) n FROM doc_versions WHERE repo=?", repo)[0]["n"]
+    assert "```mermaid" in db.docs.one({"repo": repo, "slug": "architecture"})["content"]
+    versions = lambda: db.doc_versions.count({"repo": repo})
     before = versions()
 
     (d / "app/services/calc.py").write_text("import motor\n\ndef add(a, b):\n    \"\"\"Now documented.\"\"\"\n    return a + b\n")
     commit()
     docgen.run(repo)  # only the services document reads that file
-    changed = db.q("SELECT slug FROM doc_versions WHERE repo=? ORDER BY id DESC LIMIT ?", repo, versions() - before)
+    changed = db.doc_versions.find({"repo": repo}, sort=[("id", -1)], limit=versions() - before)
     assert [r["slug"] for r in changed] == ["modules/services"]
-    assert docgen.search("documented")[0]["slug"] == "modules/services"
+    hit = docgen.search("documented")[0]
+    assert hit["slug"] == "modules/services" and "**documented**" in hit["snippet"]
+    assert docgen.search("docum")[0]["slug"] == "modules/services"  # words match as prefixes
+    assert docgen.search("zzz-nothing") == [] and docgen.search("") == []
 
     with TestClient(app) as c:
         sign_in(c, "alice")
         hist = c.get("/api/docs/tiny/history/modules/services").json()
-        assert len(hist) == 2 and "Now documented" in c.get(f"/api/docs/tiny/diff/{hist[0]['id']}").json()["diff"]
+        assert len(hist) == 2 and hist[0]["size"] > 0
+        assert "Now documented" in c.get(f"/api/docs/tiny/diff/{hist[0]['id']}").json()["diff"]
         assert c.get("/api/docs/tiny/modules/services?download=1").headers["content-disposition"].endswith('services.md"')
         assert c.get("/api/docs/tiny/zip").content[:2] == b"PK"
+        assert [d["kind"] for d in c.get("/api/docs").json()[-1]["docs"][:2]] == ["overview", "architecture"]
 
     # Once a model is set, every document is rewritten with its prose on top of the reference.
     saved = docgen.llm.configured, docgen.write_prose
@@ -384,7 +397,7 @@ def test_generated_docs_follow_the_code():
         docgen.run(repo)
     finally:
         docgen.llm.configured, docgen.write_prose = saved
-    rows = db.q("SELECT slug, status, summary, content FROM docs WHERE repo=?", repo)
+    rows = db.docs.find({"repo": repo}, fields=["slug", "status", "summary", "content"])
     assert all(r["status"] == "written" for r in rows)  # the API reference needs no prose, so it counts as written
     services = next(r for r in rows if r["slug"] == "modules/services")
     assert services["summary"] == "Written for module." and services["content"].index("Written for") < services["content"].index("## Reference")

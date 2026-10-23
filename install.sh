@@ -89,6 +89,7 @@ setkv DOMAIN "$DOMAIN"
 setkv BIND_ADDR 127.0.0.1                                         # 7000/7010 stay private; Caddy serves 443
 setkv SONAR_PUBLIC_URL "https://$DOMAIN/sonar"
 fill SESSION_SECRET "$(openssl rand -hex 32)"
+fill TOKEN_ENCRYPTION_KEY "$(openssl rand -hex 32)"
 fill SONAR_DB_PASSWORD "$(openssl rand -hex 24)"
 fill GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 32)"
 for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS EXTRA_REPOS \

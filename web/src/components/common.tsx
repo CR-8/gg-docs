@@ -1,9 +1,11 @@
 // The handful of pieces every page is built from, so they all read the same.
 import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { ArrowDown, ArrowUp } from "lucide-react"
+import { ArrowDown, ArrowUp, Check, Copy as CopyIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ago, FAIL, PASS, short, when } from "@/lib/api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -230,3 +232,37 @@ export function DataTable<T extends Record<string, any>>(props: {
     </Table>
   )
 }
+
+/** A labelled form field with an optional hint under it. */
+export const Field = ({ id, label, hint, children }: { id: string; label: string; hint?: ReactNode; children: ReactNode }) => (
+  <div className="grid gap-1.5">
+    <Label htmlFor={id}>{label}</Label>
+    {children}
+    {hint && <p className="text-muted-foreground text-xs text-pretty">{hint}</p>}
+  </div>
+)
+
+export const Note = ({ children }: { children: ReactNode }) => <span className="text-muted-foreground text-sm">{children}</span>
+
+export function Copy({ text }: { text: string }) {
+  const [done, setDone] = useState(false)
+  return (
+    <Button type="button" variant="ghost" size="icon-xs" aria-label="Copy" onClick={() =>
+      navigator.clipboard.writeText(text).then(() => {
+        setDone(true)
+        setTimeout(() => setDone(false), 1500)
+      })}>
+      {done ? <Check /> : <CopyIcon />}
+    </Button>
+  )
+}
+
+export const Snippet = ({ label, text }: { label: ReactNode; text: string }) => (
+  <div>
+    <div className="text-muted-foreground mb-1 text-xs">{label}</div>
+    <div className="bg-muted flex items-start gap-2 rounded-lg py-2 pr-2 pl-3">
+      <code className="flex-1 font-mono text-xs break-all whitespace-pre-wrap">{text}</code>
+      <Copy text={text} />
+    </div>
+  </div>
+)

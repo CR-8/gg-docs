@@ -1,12 +1,12 @@
 """GeneGenius portal: git-synced architecture views, CI breakage tracking, PR review bot and chatbot.
 
-Multi-tenant: every workspace has its own SQLite database, clones and generated files under
-data/workspaces/<id>/. Users, workspaces, members, invites and which repositories each workspace imported live in
-data/control.db. WORKSPACE says which tenant the current request or job is for; every per-tenant path and query
-reads it, so code that runs outside a tenant fails loudly instead of touching someone else's data.
+Multi-tenant: every workspace's data is in MongoDB (db.py), each document tagged with its workspace; clones and
+generated files are under data/workspaces/<id>/. WORKSPACE says which tenant the current request or job is for;
+every per-tenant path and query reads it, so code that runs outside a tenant fails loudly instead of touching
+someone else's data.
 
-All configuration is environment variables (see .env.example); LLM keys and the Sonar token are set
-by workspace admins in the Settings page and stored in that workspace's database.
+All configuration is environment variables (see .env.example); LLM keys, the Sonar token and integration keys are
+set by workspace admins in the Settings page and stored encrypted (secret.py).
 """
 import contextvars
 import json

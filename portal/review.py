@@ -121,7 +121,7 @@ def blame(repo, head, path, line):
 
 
 def run_review(repo, *, pr=0, branch="", title, author, base, head, diff_base, header):
-    if db.q("SELECT 1 FROM reviews WHERE repo=? AND pr=? AND branch=? AND head_sha=?", repo, pr, branch, head):
+    if db.reviews.one({"repo": repo, "pr": pr, "branch": branch, "head_sha": head}, fields=["id"]):
         return None
     if not llm.configured():
         log("review", f"{repo}: skipped, no LLM configured in Settings", False)
@@ -145,17 +145,17 @@ def run_review(repo, *, pr=0, branch="", title, author, base, head, diff_base, h
     summary = " ".join(s for s in summaries if s).strip() or ("No reviewable changes." if not files else "")
     if skipped:
         summary += f"\n\nNot reviewed (too large): {', '.join(skipped[:30])}"
-    rid = db.x("INSERT INTO reviews(repo, pr, branch, title, author, base_sha, head_sha, model, summary, status, created_at) "
-               "VALUES(?,?,?,?,?,?,?,?,?,?,?)", repo, pr, branch, title, author, base, head,
-               llm.config()["llm_model"], summary, "done", now())
-    fallback = db.q("SELECT person FROM commits WHERE repo=? AND sha=?", repo, head)
+    rid = db.reviews.insert({"repo": repo, "pr": pr, "branch": branch, "title": title, "author": author, "base_sha": base,
+                             "head_sha": head, "model": llm.config()["llm_model"], "summary": summary, "status": "done",
+                             "posted_url": None, "created_at": now()}, with_id=True)
+    fallback = db.commits.one({"repo": repo, "sha": head}, fields=["person"])
     rows = []
     for f in findings:
         sha, email = blame(repo, head, f["path"], f["line"])
-        person = person_for(email) if email else (fallback[0]["person"] if fallback else author)
-        rows.append((rid, f["path"], f["line"], f["severity"], f["category"], f["title"], f["body"], sha, person))
-    db.xs("INSERT INTO findings(review_id, path, line, severity, category, title, body, sha, person) "
-          "VALUES(?,?,?,?,?,?,?,?,?)", rows)
+        person = person_for(email) if email else (fallback["person"] if fallback else author)
+        rows.append({"review_id": rid, **{k: f[k] for k in ("path", "line", "severity", "category", "title", "body")},
+                     "sha": sha, "person": person})
+    db.findings.insert_many(rows, with_id=True)
     log("review", f"{repo} {'#' + str(pr) if pr else branch}: {len(findings)} findings")
     return rid, summary, findings, commentable
 
@@ -168,9 +168,9 @@ def review_pr(repo, number):
     # Outside refs/remotes, so `fetch --prune` keeps it and ingest_commits (--remotes) doesn't count PR heads as branches.
     git(repo, "fetch", "--quiet", "origin", f"+refs/pull/{number}/head:refs/portal/pr/{number}", auth=True)
     base, head = pr["base"]["sha"], pr["head"]["sha"]
-    prev = db.q("SELECT head_sha FROM reviews WHERE repo=? AND pr=? ORDER BY id DESC LIMIT 1", repo, number)
-    if prev and git_ok(repo, "merge-base", "--is-ancestor", prev[0]["head_sha"], head):
-        diff_base = prev[0]["head_sha"]  # incremental: only what changed since the last review
+    prev = db.reviews.one({"repo": repo, "pr": number}, sort=[("id", -1)], fields=["head_sha"])
+    if prev and git_ok(repo, "merge-base", "--is-ancestor", prev["head_sha"], head):
+        diff_base = prev["head_sha"]  # incremental: only what changed since the last review
     else:
         diff_base = git(repo, "merge-base", base, head).strip()
     header = f"Repository: {repo}\nPull request #{number}: {pr['title']}\nAuthor: {pr['user']['login']}"
@@ -188,10 +188,10 @@ def review_push(repo, branch, before, after):
             return
     if not git_ok(repo, "merge-base", "--is-ancestor", before, after):
         before = f"{after}~1"  # force push: review the new head commit only
-    pusher = db.q("SELECT pusher FROM pushes WHERE repo=? AND after=? ORDER BY id DESC LIMIT 1", repo, after)
-    who = db.q("SELECT person FROM commits WHERE repo=? AND sha=?", repo, after)
+    pusher = db.pushes.one({"repo": repo, "after": after}, sort=[("id", -1)], fields=["pusher"])
+    who = db.commits.one({"repo": repo, "sha": after}, fields=["person"])
     run_review(repo, branch=branch, title=git(repo, "log", "-1", "--format=%s", after).strip(),
-               author=(pusher and pusher[0]["pusher"]) or (who and who[0]["person"]) or None,
+               author=(pusher and pusher["pusher"]) or (who and who["person"]) or None,
                base=before, head=after, diff_base=before,
                header=f"Repository: {repo}\nDirect push to {branch}: {before[:12]}..{after[:12]}")
 
@@ -218,4 +218,4 @@ def post(repo, number, head, rid, summary, findings, commentable):
         payload["comments"] = []
         r = gh.request("POST", f"/repos/{repo}/pulls/{number}/reviews", check=False, json=payload)
     r.raise_for_status()
-    db.x("UPDATE reviews SET posted_url=? WHERE id=?", r.json()["html_url"], rid)
+    db.reviews.update({"id": rid}, {"$set": {"posted_url": r.json()["html_url"]}})

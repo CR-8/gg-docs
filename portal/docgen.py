@@ -6,7 +6,7 @@ Facts come from the code itself (files, symbols, imports, routes, env vars, inte
 the default branch with git, for any Python or JS/TS repository. Diagrams are drawn from those facts (Mermaid), so they
 are always right; the configured LLM (the local model or a hosted one) writes the explanation on top. Each document
 keeps a fingerprint of the inputs it was written from, so a push regenerates only the documents whose part of the code
-changed; a new repository gets its whole set. Every version is kept (history, diffs) and indexed for search (FTS5).
+changed; a new repository gets its whole set. Every version is kept (history, diffs) and searchable.
 """
 import ast
 import hashlib
@@ -588,17 +588,13 @@ def render(a, d, head, with_llm):
 
 
 def save(repo, d, content, summary, model, status, fp, head):
-    old = db.q("SELECT content FROM docs WHERE repo=? AND slug=?", repo, d["slug"])
-    db.x("INSERT INTO docs(repo, slug, kind, title, summary, content, inputs, head_sha, model, generated_at, status, error) "
-         "VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(repo, slug) DO UPDATE SET kind=excluded.kind, title=excluded.title, "
-         "summary=excluded.summary, content=excluded.content, inputs=excluded.inputs, head_sha=excluded.head_sha, "
-         "model=excluded.model, generated_at=excluded.generated_at, status=excluded.status, error=NULL",
-         repo, d["slug"], d["kind"], d["title"], summary, content, fp, head, model, now(), status)
-    if not old or old[0]["content"] != content:
-        db.x("INSERT INTO doc_versions(repo, slug, head_sha, content, generated_at, model) VALUES(?,?,?,?,?,?)",
-             repo, d["slug"], head, content, now(), model)
-    db.x("DELETE FROM docs_fts WHERE repo=? AND slug=?", repo, d["slug"])
-    db.x("INSERT INTO docs_fts(repo, slug, title, content) VALUES(?,?,?,?)", repo, d["slug"], d["title"], content)
+    old = db.docs.one({"repo": repo, "slug": d["slug"]}, fields=["content"])
+    db.docs.upsert({"repo": repo, "slug": d["slug"]}, {
+        "kind": d["kind"], "title": d["title"], "summary": summary, "content": content, "inputs": fp, "head_sha": head,
+        "model": model, "generated_at": now(), "status": status, "error": None})
+    if not old or old["content"] != content:
+        db.doc_versions.insert({"repo": repo, "slug": d["slug"], "head_sha": head, "content": content,
+                                "generated_at": now(), "model": model}, with_id=True)
 
 
 def run(repo, only=None, force=False):
@@ -610,13 +606,12 @@ def run(repo, only=None, force=False):
     STATUS[key] = {"state": "reading the code", "done": 0, "total": 0, "current": None, "head": head}
     a = analyze(repo)
     docs = plan(a)
-    known = {r["slug"]: r["inputs"] for r in db.q("SELECT slug, inputs FROM docs WHERE repo=?", repo)}
+    known = {r["slug"]: r["inputs"] for r in db.docs.find({"repo": repo}, fields=["slug", "inputs"])}
     todo = [(d, fp) for d in docs if (not only or d["slug"] == only)
             for fp in [fingerprint(a, d, with_llm)] if force or known.get(d["slug"]) != fp]
     if not only:  # components that no longer exist
         for slug in set(known) - {d["slug"] for d in docs}:
-            db.x("DELETE FROM docs WHERE repo=? AND slug=?", repo, slug)
-            db.x("DELETE FROM docs_fts WHERE repo=? AND slug=?", repo, slug)
+            db.docs.delete({"repo": repo, "slug": slug})
     STATUS[key].update(state="writing", total=len(todo))
     failures = 0
     for d, fp in todo:
@@ -626,7 +621,7 @@ def run(repo, only=None, force=False):
             failures = 0
         except llm.LLMError as e:
             failures += 1
-            db.x("UPDATE docs SET error=? WHERE repo=? AND slug=?", str(e)[:500], repo, d["slug"])
+            db.docs.update({"repo": repo, "slug": d["slug"]}, {"$set": {"error": str(e)[:500]}})
             log("docs", f"{repo} {d['slug']}: {e}", False)
             if failures >= 3:  # the model is down: stop, the next sync retries
                 break
@@ -683,9 +678,21 @@ def writing():
 
 
 def search(q, limit=20):
-    """Full-text search over every generated document; each word matches as a prefix."""
-    terms = re.findall(r"\w+", q)
+    """Full-text search over every generated document: each word matches as a prefix of a word in the title or the
+    text, best matches first, with a snippet around the first hit.
+    ponytail: a regex scan of the workspace's documents; a text index or Atlas Search past a few thousand of them."""
+    terms = re.findall(r"\w+", q)[:10]
     if not terms:
         return []
-    return db.q("SELECT repo, slug, title, snippet(docs_fts, 3, '**', '**', ' … ', 18) snippet FROM docs_fts "
-                "WHERE docs_fts MATCH ? ORDER BY rank LIMIT ?", " ".join(f'"{t}"*' for t in terms), limit)
+    rows = db.docs.find({"$and": [{"$or": [{"title": db.regex_word(t)}, {"content": db.regex_word(t)}]} for t in terms]},
+                        fields=["repo", "slug", "title", "content"])
+    words = re.compile(r"\b(?:" + "|".join(map(re.escape, terms)) + r")\w*", re.I)
+    for r in rows:
+        text = r.pop("content") or ""
+        r["score"] = 5 * len(words.findall(r["title"] or "")) + len(words.findall(text))
+        m = words.search(text)
+        start = max(0, m.start() - 80) if m else 0
+        excerpt = " ".join(text[start:start + 220].split())
+        r["snippet"] = ("… " if start else "") + words.sub(lambda w: f"**{w[0]}**", excerpt) + " …"
+    rows.sort(key=lambda r: -r.pop("score"))
+    return rows[:limit]
