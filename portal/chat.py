@@ -10,11 +10,9 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import httpx
-
-from . import SONAR_URL, WORKSPACE, db, docgen, llm, repo_dir, site_dir, work_dir
+from . import WORKSPACE, db, docgen, llm, repo_dir, site_dir, work_dir
 from .github import gh
-from .sync import sonar_keys, sonar_token, views
+from .sync import views
 
 MAX_ROUNDS = 10
 MAX_OUT = int(os.environ.get("CHAT_TOOL_CHARS") or 20000)  # per tool result; smaller for a local model's context
@@ -38,7 +36,6 @@ How the data is collected:
   that commit's author, pusher who pushed it; fixed_sha is the first later commit where it passed again.
 - reviews / findings: the review bot's results per PR (pr > 0) or direct push (pr = 0, branch set); each finding
   is blamed to the person who wrote that line. category 'slop' = works but should not be merged as is.
-- sonar_issues: daily snapshot of open SonarQube issues per SCM author email.
 - pulls: pull requests (state open, closed or merged) from GitHub, refreshed on every sync and pull_request webhook;
   reviews.pr joins to pulls.number.
 Weighted findings per 1k added lines uses nit 0.5, minor 1, major 3, critical 8.
@@ -73,10 +70,6 @@ def tools():
         {"name": "architecture", "description": "Read ARCHITECTURE.md: modules and their files, import maps, every "
          "route. Without section, returns the list of headings.",
          "parameters": {"type": "object", "properties": {"section": {"type": "string"}}}},
-        {"name": "sonar_issues", "description": "List open SonarQube issues for a repo, optionally for one author email.",
-         "parameters": {"type": "object", "properties": {
-             "repo": {"type": "string", "enum": repos}, "author_email": {"type": "string"},
-             "quality": {"type": "string", "enum": ["RELIABILITY", "SECURITY", "MAINTAINABILITY"]}}, "required": ["repo"]}},
         {"name": "pull_requests", "description": "List pull requests, most recently updated first: title, author, state, "
          "branches, head SHA, and how many review-bot findings the current head has.",
          "parameters": {"type": "object", "properties": {
@@ -189,27 +182,6 @@ def tool_architecture(section=""):
     return f"No section matching {section!r}."
 
 
-def tool_sonar_issues(repo, author_email="", quality=""):
-    token = sonar_token()
-    keys = sonar_keys()
-    if not token or repo not in keys:
-        return "SonarQube is not configured."
-    params = {"components": keys[repo], "issueStatuses": "OPEN,CONFIRMED", "ps": 100}
-    if author_email:
-        params["author"] = author_email
-    if quality:
-        params["impactSoftwareQualities"] = quality
-    r = httpx.get(f"{SONAR_URL}/api/issues/search", params=params, timeout=30, headers={"Authorization": f"Bearer {token}"})
-    if r.status_code != 200:
-        return f"SonarQube returned {r.status_code}."
-    data = r.json()
-    rows = [{"file": i.get("component", "").split(":", 1)[-1], "line": i.get("line"), "rule": i.get("rule"),
-             "message": i.get("message"), "author": i.get("author"),
-             "impacts": [f"{m['softwareQuality']}:{m['severity']}" for m in i.get("impacts", [])]}
-            for i in data.get("issues", [])]
-    return json.dumps({"total": data.get("total"), "issues": rows})
-
-
 def tool_pull_requests(repo="", state="open", limit=30):
     f = {} if state == "all" else {"state": state}
     if repo:
@@ -272,7 +244,7 @@ def tool_docs(repo="", slug="", query=""):
 
 
 RUN = {"query": tool_query, "commit_diff": tool_commit_diff, "code_graph": tool_code_graph,
-       "architecture": tool_architecture, "sonar_issues": tool_sonar_issues, "pull_requests": tool_pull_requests,
+       "architecture": tool_architecture, "pull_requests": tool_pull_requests,
        "pull_request": tool_pull_request, "recent_pushes": tool_recent_pushes, "docs": tool_docs}
 
 

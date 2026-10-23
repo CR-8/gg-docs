@@ -28,7 +28,7 @@ from pymongo.errors import DuplicateKeyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (PUBLIC_URL, ROOT, SONAR_PUBLIC_URL, WORKSPACE, auth, chat, db, docgen, integrations, llm, mail, mcp,
+from . import (PUBLIC_URL, ROOT, WORKSPACE, auth, chat, db, docgen, integrations, llm, mail, mcp,
                secret, site_dir, sync, workspace)
 from .github import RateLimited, gh, pkce, repo_meta, verify_signature
 from .review import SEVERITIES
@@ -51,7 +51,7 @@ ROLES = ("owner", "admin", "member")
 INVITE_DAYS, INVITES_PER_DAY = 7, 50
 OAUTH_STATE_SECONDS = 600
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-SECRETS = ("llm_api_key", "sonar_token")
+SECRETS = ("llm_api_key",)
 WEIGHT = {"critical": 8, "major": 3, "minor": 1, "nit": 0.5}
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 UNKNOWN = object()
@@ -619,7 +619,7 @@ def summary():
                     "passed": sum(r["conclusion"] in ("success", "skipped", "neutral") for r in rows),
                     "failed": sum(r["conclusion"] in ("failure", "timed_out") for r in rows)}
     last_sync = db.events.one({"kind": "sync"}, sort=[("id", -1)], fields=["ok", "detail"])
-    return {"ci": ci, "sonar_url": SONAR_PUBLIC_URL or None, "open_breakages": db.breakages.count({"fixed_sha": None}),
+    return {"ci": ci, "open_breakages": db.breakages.count({"fixed_sha": None}),
             "worker": sync.status(), "github": gh.mode, "llm": llm.configured(), "llm_model": llm.config()["llm_model"],
             "repos": db.repos(), "views": bool(sync.views()), "docs_writing": docgen.writing(),
             "sync_error": last_sync["detail"] if last_sync and not last_sync["ok"] else None}
@@ -679,12 +679,6 @@ def people(days: int = 90):
         s["findings"] += r["n"]
         if k.get("category") == "slop":
             s["slop"] += r["n"]
-    latest = db.sonar_issues.one(sort=[("taken_on", -1)], fields=["taken_on"])
-    if latest:
-        ids = {r["email"]: r["login"] for r in db.identities.find(fields=["email", "login"])}
-        for r in db.sonar_issues.aggregate([{"$match": {"taken_on": latest["taken_on"]}}, {"$group": {
-                "_id": {"email": "$author_email", "quality": "$quality"}, "n": {"$sum": "$count"}}}]):
-            stats[sync.person_for(r["_id"]["email"], ids)][f"sonar_{r['_id']['quality']}"] += r["n"]
     out = []
     for person, s in stats.items():
         if not person:
@@ -762,7 +756,7 @@ async def ask(request: Request):
 def settings_view():
     cfg = llm.config()
     out = {k: cfg[k] for k in llm.DEFAULTS}
-    current = {"llm_api_key": cfg["llm_api_key"], "sonar_token": sync.sonar_token()}  # saved, or from .env
+    current = {"llm_api_key": cfg["llm_api_key"]}  # saved, or from .env
     for key in SECRETS:
         value = current[key]
         out[key] = f"saved, ends in {value[-4:]}" if value else ""
@@ -805,8 +799,6 @@ async def put_settings(request: Request):
             db.del_setting(key)
         else:
             db.set_setting(key, cfg[key])
-    if body.get("sonar_token"):
-        db.set_setting("sonar_token", str(body["sonar_token"]).strip())
     if "post_reviews" in body:
         db.set_setting("post_reviews", bool(body["post_reviews"]))
     return settings_view()

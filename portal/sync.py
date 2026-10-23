@@ -1,5 +1,5 @@
 """Git sync worker: clone/fetch, ingest commits, pushes and CI results, detect breakages, and schedule
-view rebuilds, reviews and Sonar scans. One worker thread runs jobs in order; a poller backs up the webhooks.
+view rebuilds and reviews. One worker thread runs jobs in order; a poller backs up the webhooks.
 Every job carries the workspace it was queued from and runs inside it."""
 import hashlib
 import os
@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 import httpx
 from pymongo import UpdateMany
 
-from . import (BACKFILL_DAYS, DEFAULT_BRANCHES, GIT_URL, POLL_SECONDS, ROOT, SONAR_KEYS, SONAR_URL, WORKSPACE, db, llm,
+from . import (BACKFILL_DAYS, DEFAULT_BRANCHES, GIT_URL, POLL_SECONDS, ROOT, WORKSPACE, db, llm,
                repo_dir, site_dir, work_dir, workspace, ws_dir)
 from .github import RateLimited, gh, repo_meta
 
@@ -87,15 +87,11 @@ def default_branch(repo):
 
 
 def views():
-    """(backend, frontend): the pair the architecture views and SonarQube are built from, or () for none.
+    """(backend, frontend): the pair the architecture views are built from, or () for none.
     ponytail: only a workspace migrated from the single-tenant install has one (build.py expects a FastAPI backend
-    and a Next.js frontend, and SONAR_KEYS are fixed names); add a picker in Settings when other tenants want it."""
+    and a Next.js frontend); add a picker in Settings when other tenants want it."""
     v = db.setting("views")
     return (v["backend"], v["frontend"]) if v else ()
-
-
-def sonar_keys():
-    return dict(zip(views(), SONAR_KEYS))
 
 
 def checkout_defaults():
@@ -251,7 +247,7 @@ def detect(repo, branch, window=80):
 # ---------- jobs ----------
 
 def check_head(repo):
-    """A new default-branch head schedules a views rebuild, a Sonar scan and a review of the change."""
+    """A new default-branch head schedules a views rebuild and a review of the change."""
     branch = default_branch(repo)
     head = git(repo, "rev-parse", f"origin/{branch}").strip()
     seen = db.setting(f"head:{repo}")
@@ -260,7 +256,6 @@ def check_head(repo):
     db.set_setting(f"head:{repo}", head)
     if repo in views():
         enqueue("rebuild")
-        enqueue("sonar")
     if seen:  # the first sync only sets the baseline
         enqueue("review_push", repo, branch, seen, head)
 
@@ -400,45 +395,6 @@ def rebuild():
     log("rebuild", "views rebuilt" if ok else detail, ok)
 
 
-def sonar_token():
-    return db.setting("sonar_token") or os.environ.get("SONAR_TOKEN", "")
-
-
-def sonar():
-    token = sonar_token()
-    if not (token and views()):
-        return
-    heads = {r: git(r, "rev-parse", f"origin/{default_branch(r)}").strip() for r in views()}
-    if heads == db.setting("sonar_heads") or time.time() - db.setting("sonar_at", 0) < 900:
-        return  # no token, nothing new, or scanned in the last 15 min (the poller retries)
-    checkout_defaults()
-    ok, detail = run_build("sonar", SONAR_TOKEN=token, SONAR_HOST_URL=SONAR_URL)
-    db.set_setting("sonar_heads", heads)
-    db.set_setting("sonar_at", time.time())
-    log("sonar", "scanned" if ok else detail, ok)
-
-
-def sonar_snapshot():
-    """Open SonarQube issues per SCM author (Sonar blames each issue to the line's author)."""
-    token = sonar_token()
-    if not token:
-        return
-    today, rows = date.today().isoformat(), []
-    for repo, key in sonar_keys().items():
-        for quality in ("RELIABILITY", "SECURITY", "MAINTAINABILITY"):
-            r = httpx.get(f"{SONAR_URL}/api/issues/search", timeout=30, headers={"Authorization": f"Bearer {token}"},
-                          params={"components": key, "impactSoftwareQualities": quality,
-                                  "issueStatuses": "OPEN,CONFIRMED", "facets": "author", "ps": 1})
-            if r.status_code == 404:
-                break  # project not analysed yet
-            r.raise_for_status()
-            for facet in r.json().get("facets", []):
-                if facet["property"] == "author":
-                    rows += [(today, repo, v["val"].lower(), quality.lower(), v["count"]) for v in facet["values"]]
-    db.sonar_issues.upsert_many([{"taken_on": t, "repo": r, "author_email": a, "quality": q, "count": n}
-                                 for t, r, a, q, n in rows], ["taken_on", "repo", "author_email", "quality"])
-
-
 def handle_webhook(event, payload):
     """One GitHub App delivers the webhooks of every tenant: each workspace that imported the repository gets it."""
     repo = (payload.get("repository") or {}).get("full_name")
@@ -470,8 +426,8 @@ def on_webhook(event, payload, repo):
 
 def handlers():
     from . import review  # review imports this module
-    return {"sync": sync, "push": on_push, "checks": on_checks, "rebuild": rebuild, "sonar": sonar,
-            "sonar_snapshot": sonar_snapshot, "review_pr": review.review_pr, "review_push": review.review_push}
+    return {"sync": sync, "push": on_push, "checks": on_checks, "rebuild": rebuild,
+            "review_pr": review.review_pr, "review_push": review.review_push}
 
 
 def worker():
@@ -492,22 +448,14 @@ def worker():
 
 
 def poller():
-    last_snapshot = 0.0
     while True:
-        snapshot = time.time() - last_snapshot > 3600
         for w in db.workspaces.find({}, {"_id": 1}):
             with workspace(w["_id"]):
                 for repo in db.repos():
                     enqueue("sync", repo)
-                if views():
-                    enqueue("sonar")
-                    if snapshot:
-                        enqueue("sonar_snapshot")
                 last = db.events.one(sort=[("id", -1)], fields=["id"])
                 if last:
                     db.events.delete({"id": {"$lt": last["id"] - 5000}})
-        if snapshot:
-            last_snapshot = time.time()
         time.sleep(POLL_SECONDS)
 
 

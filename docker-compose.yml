@@ -1,6 +1,6 @@
-# gg portal on :7000 (with its MongoDB) and SonarQube on :7010/sonar.    docker compose up -d --build
+# gg portal on :7000, with its MongoDB.    docker compose up -d --build
 # Optional parts are profiles, switched on with COMPOSE_PROFILES in .env (install.sh sets it):
-#   https - Caddy serves https://DOMAIN and https://DOMAIN/sonar with an automatic certificate
+#   https - Caddy serves https://DOMAIN with an automatic certificate
 #   llm   - a local coder model (Ollama) the portal uses for reviews and the chatbot
 name: gg-portal
 services:
@@ -8,7 +8,6 @@ services:
     build: .   # install.sh makes sure containers (and so build steps) can resolve names first
     env_file: .env
     environment:
-      SONAR_URL: http://sonarqube:9000/sonar
       GITHUB_APP_PRIVATE_KEY_FILE: /secrets/github-app.pem
       MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/gg-docs}   # .env's MONGODB_URI (e.g. Atlas) wins
     volumes:
@@ -29,33 +28,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    restart: unless-stopped
-
-  sonarqube:
-    image: sonarqube:community
-    environment:
-      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
-      SONAR_JDBC_USERNAME: sonar
-      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}
-      SONAR_WEB_CONTEXT: /sonar
-    volumes:
-      - sonar_data:/opt/sonarqube/data
-      - sonar_extensions:/opt/sonarqube/extensions
-      - sonar_logs:/opt/sonarqube/logs
-    ports: ["${BIND_ADDR:-0.0.0.0}:7010:9000"]
-    ulimits:
-      nofile: {soft: 131072, hard: 131072}
-      nproc: 8192
-    depends_on: [sonar-db]
-    restart: unless-stopped
-
-  sonar-db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: sonar
-      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD}
-      POSTGRES_DB: sonar
-    volumes: [sonar_db:/var/lib/postgresql/data]
     restart: unless-stopped
 
   # Optional local model (profile "llm"): OpenAI-compatible API at http://llm:11434/v1, reachable only by the portal.
@@ -79,15 +51,11 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
-    depends_on: [portal, sonarqube]
+    depends_on: [portal]
     restart: unless-stopped
 
 volumes:
   portal_data:
   mongo_data:
-  sonar_data:
-  sonar_extensions:
-  sonar_logs:
-  sonar_db:
   caddy_data:
   ollama:

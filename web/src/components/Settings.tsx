@@ -78,7 +78,7 @@ function StatusPanel({ admin }: { admin: boolean }) {
   )
 }
 
-const MCP_TOOLS = ["pull_requests", "pull_request", "recent_pushes", "docs", "query", "commit_diff", "code_graph", "architecture", "sonar_issues"]
+const MCP_TOOLS = ["pull_requests", "pull_request", "recent_pushes", "docs", "query", "commit_diff", "code_graph", "architecture"]
 
 type McpInfo = { url: string; token_url: string | null; token: string | null; legacy: boolean }
 
@@ -256,7 +256,7 @@ function Jobs() {
     return () => clearInterval(t)
   }, [])
   return (
-    <Section flush title="Recent jobs" description="Sync, push, checks, rebuild, review and Sonar runs, newest first. A failed step says why.">
+    <Section flush title="Recent jobs" description="Sync, push, checks, rebuild and review runs, newest first. A failed step says why.">
       {!ev.data ? <Loading /> : (
         <DataTable
           rows={ev.data}
@@ -283,7 +283,6 @@ export function Settings() {
   const [key, setKey] = useState("")
   const [effort, setEffort] = useState("high")
   const [postReviews, setPostReviews] = useState(false)
-  const [sonar, setSonar] = useState("")
   const [msg, setMsg] = useState<{ ok?: boolean; text: string; busy?: boolean }>({ text: "" })
 
   // Fill the form once both the saved settings and the local model list are in.
@@ -311,7 +310,6 @@ export function Settings() {
       : { llm_kind: provider, llm_base_url: base.trim(), llm_model: model[provider].trim(),
           llm_effort: provider === "anthropic" && effort !== "none" ? effort : "", llm_api_key: key }),
     post_reviews: postReviews,
-    sonar_token: sonar,
   })
   const [modelList, setModelList] = useState<string[]>([])
   const loadModels = async () => {
@@ -340,7 +338,6 @@ export function Settings() {
     try {
       await post("/api/settings", body(), "PUT")
       setKey("")
-      setSonar("")
       saved.reload()
       setMsg({ ok: true, text: "Saved. Reviews and Ask use it from now on." })
     } catch (err: any) {
@@ -425,24 +422,17 @@ export function Settings() {
               )}
             </Section>
 
-            <div className="grid gap-6 sm:grid-cols-2">
-              <Section title="Review bot">
-                <div className="flex items-start gap-3">
-                  <Switch id="post" checked={postReviews} onCheckedChange={setPostReviews} />
-                  <Label htmlFor="post" className="block leading-snug font-normal">
-                    Post reviews on GitHub PRs
-                    <span className="text-muted-foreground mt-1 block text-xs">
-                      Off: reviews stay in the portal and in Ask. Posting needs the GitHub App, or a token that can write pull requests.
-                    </span>
-                  </Label>
-                </div>
-              </Section>
-              <Section title="SonarQube">
-                <Field id="sonar" label="Token" hint={<>{saved.data?.sonar_token ? `Saved (${saved.data.sonar_token}). Blank keeps it. ` : ""}SonarQube → My Account → Security → Global Analysis token.</>}>
-                  <Input id="sonar" type="password" autoComplete="off" value={sonar} onChange={(e) => setSonar(e.target.value)} />
-                </Field>
-              </Section>
-            </div>
+            <Section title="Review bot">
+              <div className="flex items-start gap-3">
+                <Switch id="post" checked={postReviews} onCheckedChange={setPostReviews} />
+                <Label htmlFor="post" className="block leading-snug font-normal">
+                  Post reviews on GitHub PRs
+                  <span className="text-muted-foreground mt-1 block text-xs">
+                    Off: reviews stay in the portal and in Ask. Posting needs the GitHub App, or a token that can write pull requests.
+                  </span>
+                </Label>
+              </div>
+            </Section>
           </fieldset>
 
           {admin && (

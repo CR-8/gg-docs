@@ -1,13 +1,13 @@
 """Regenerate the architecture views into SITE_DIR (default ./site).
 
     python build.py                  # graphs routes deps index
-    python build.py graphs deps      # only some: graphs routes deps sonar index
+    python build.py graphs deps      # only some: graphs routes deps index
 
 Writes the views (graphify, Redoc and dependency-cruiser pages, import maps as Mermaid, the graph reports),
 overview.json for the portal's Overview page, and ARCHITECTURE.md (the same content as Markdown). Inside the portal
 container the worker runs this after every push to a default branch; tests are left to CI.
 Env: BACKEND_DIR / FRONTEND_DIR (repo checkouts), SITE_DIR, WORK_DIR, BACKEND_PYTHON (an interpreter
-with the backend's requirements, for the OpenAPI export), SONAR_HOST_URL + SONAR_TOKEN (sonar step).
+with the backend's requirements, for the OpenAPI export).
 """
 import ast
 import json
@@ -203,26 +203,6 @@ def step_deps():
         f.write_text(mm, encoding="utf-8")
 
 
-# ---------- sonar: push both repos into SonarQube (needs sonar-scanner on PATH) ----------
-
-def step_sonar():
-    if not os.environ.get("SONAR_TOKEN"):  # the scanner reads SONAR_TOKEN itself, so it never lands on argv
-        print("sonar: skipped, SONAR_TOKEN is not set")
-        return
-    scanner = shutil.which("sonar-scanner")
-    if not scanner:
-        print("sonar: skipped, sonar-scanner is not installed")
-        return
-    host = os.environ.get("SONAR_HOST_URL", "http://localhost:7010")
-    for key, repo, props in (
-        ("gg-backend", BACKEND, ["-Dsonar.sources=app", "-Dsonar.tests=tests", "-Dsonar.python.version=3.11"]),
-        ("gg-frontend", FRONTEND, ["-Dsonar.sources=src", "-Dsonar.tests=src",
-                                            "-Dsonar.exclusions=**/*.test.*", "-Dsonar.test.inclusions=**/*.test.*"]),
-    ):
-        run([scanner, f"-Dsonar.host.url={host}", f"-Dsonar.projectKey={key}", f"-Dsonar.projectBaseDir={repo}",
-             f"-Dsonar.working.directory={WORK / ('scanner-' + key)}", *props])
-
-
 # ---------- overview.json: what the portal's Overview page (web/src/components/Overview.tsx) shows ----------
 
 def git_ref(repo):
@@ -312,7 +292,7 @@ def write_markdown():
     (SITE / "ARCHITECTURE.md").write_text("\n".join(md), encoding="utf-8")
 
 
-STEPS = {"graphs": step_graphs, "routes": step_routes, "deps": step_deps, "sonar": step_sonar,
+STEPS = {"graphs": step_graphs, "routes": step_routes, "deps": step_deps,
          "index": lambda: None}  # overview.json and ARCHITECTURE.md are rebuilt after any step
 DEFAULT = ["graphs", "routes", "deps"]
 

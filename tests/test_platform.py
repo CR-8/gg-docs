@@ -601,9 +601,9 @@ def test_mongodb_scoping_indexes_secrets_and_health(monkeypatch):
         db.commits.c.insert_one({"workspace_id": WS + 1000, "repo": "u/x", "sha": "1"})  # another tenant may
         assert db.commits.count({"repo": "u/x"}) == 1 and "workspace_id" not in db.commits.one({"repo": "u/x"})
         db.mongo.commits.delete_many({"repo": "u/x"})
-        db.set_setting("sonar_token", "squ_123")
-        assert db.setting("sonar_token") == "squ_123" and "squ_" not in db.settings.c.find_one({"key": "sonar_token"})["value"]
-        db.del_setting("sonar_token")
+        db.set_setting("llm_api_key", "sk-123")
+        assert db.setting("llm_api_key") == "sk-123" and "sk-" not in db.settings.c.find_one({"key": "llm_api_key"})["value"]
+        db.del_setting("llm_api_key")
     assert secret.unseal("v1:garbage") == "" and secret.unseal(None) == ""
     with client() as c:
         assert c.get("/healthz").json() == {"ok": True, "database": "up"}

@@ -51,7 +51,7 @@ class ServiceError(Exception):
 
 def outside(url):
     """True for a public host. Tenants share this server, so a URL they configure must not reach its insides (cloud
-    metadata, SonarQube, other containers). ponytail: checked when saved; a per-request check if DNS rebinding matters."""
+    metadata, MongoDB, other containers). ponytail: checked when saved; a per-request check if DNS rebinding matters."""
     if ALLOW_PRIVATE or url.rstrip("/").startswith(llm.OLLAMA_URL):
         return True
     try:

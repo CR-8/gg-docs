@@ -13,9 +13,10 @@ re-run changes nothing and never overwrites what the portal wrote since; progres
 so an interrupted run resumes where it stopped (--restart reads everything again). Ids the API and URLs use (workspace,
 review, finding, push, breakage, doc version, event and invite ids) are kept, and the id counters continue after them.
 
-Not migrated, on purpose: docs_fts (an index, rebuilt from docs) and the users table's GitHub tokens (plaintext, 8-hour
-tokens: everyone signs in with GitHub again). Members become pending memberships under their GitHub login, claimed by
-that account at its first sign-in (db.claim_pending). LLM and Sonar keys are migrated encrypted.
+Not migrated, on purpose: docs_fts (an index, rebuilt from docs), sonar_issues (SonarQube is gone) and the users
+table's GitHub tokens (plaintext, 8-hour tokens: everyone signs in with GitHub again). Members become pending
+memberships under their GitHub login, claimed by that account at its first sign-in (db.claim_pending). LLM keys are
+migrated encrypted, and so is an older release's SonarQube token, which nothing reads any more.
 """
 import argparse
 import json
@@ -37,12 +38,13 @@ TABLES = {
     "pushes": ("pushes", ("repo", "branch", "before", "after")), "pulls": ("pulls", ("repo", "number")),
     "checks": ("checks", ("repo", "sha", "name")), "breakages": ("breakages", ("repo", "branch", "check_name", "broken_sha")),
     "reviews": ("reviews", ("repo", "pr", "branch", "head_sha")), "findings": ("findings", ("id",)),
-    "sonar_issues": ("sonar_issues", ("taken_on", "repo", "author_email", "quality")), "docs": ("docs", ("repo", "slug")),
+    "docs": ("docs", ("repo", "slug")),
     "doc_versions": ("doc_versions", ("id",)), "events": ("events", ("id",)),
 }
 WITH_IDS = ("pushes", "breakages", "reviews", "findings", "doc_versions", "events")
 DEFAULTS = {"commits": {"on_default": 0}, "reviews": {"pr": 0, "branch": ""}}
 SAMPLE = 20
+SEALED = db.SECRET_SETTINGS + ("sonar_token",)  # an older release's SonarQube token stays encrypted
 
 
 def open_ro(path):
@@ -61,7 +63,7 @@ def convert(table, row, con=None, seal=True):
     doc = {**DEFAULTS.get(table, {}), **{k: row[k] for k in row.keys() if k != "_rowid"}}
     if table == "settings":
         value = json.loads(doc["value"])
-        doc["value"] = secret.seal(value) if seal and doc["key"] in db.SECRET_SETTINGS else value
+        doc["value"] = secret.seal(value) if seal and doc["key"] in SEALED else value
     if table == "pushes":
         doc["commit_shas"] = [] if con is None else \
             [r[0] for r in con.execute("SELECT sha FROM push_commits WHERE push_id=? ORDER BY rowid", (doc["id"],))]
@@ -73,7 +75,7 @@ def same(table, src, dst):
     diff = []
     for k, v in src.items():
         have = dst.get(k)
-        if table == "settings" and k == "value" and src["key"] in db.SECRET_SETTINGS:
+        if table == "settings" and k == "value" and src["key"] in SEALED:
             v, have = secret.unseal(v), secret.unseal(have)
         if have != v:
             diff.append(k)

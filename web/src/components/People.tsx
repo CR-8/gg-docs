@@ -9,11 +9,6 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 
 type Row = Record<string, any> & { person: string }
 
-const sonar = (r: Row) =>
-  [r.sonar_reliability, r.sonar_security, r.sonar_maintainability].some(Boolean)
-    ? `${r.sonar_reliability || 0} / ${r.sonar_security || 0} / ${r.sonar_maintainability || 0}`
-    : ""
-
 const fromHash = () => decodeURIComponent(location.hash.slice(1))
 
 function Detail({ person, days }: { person: string; days: string }) {
@@ -124,7 +119,6 @@ export function People() {
                 render: (r) => r.findings ? <>{r.findings} <span className="text-muted-foreground text-xs">{r.critical || 0}c {r.major || 0}M {r.minor || 0}m {r.nit || 0}n</span></> : "" },
               { key: "slop", label: "Slop", num: true, title: "Findings in the slop category: works, but shouldn't be merged as is" },
               { key: "weighted_per_kloc", label: "Per 1k lines", num: true, title: "Findings weighted nit 0.5, minor 1, major 3, critical 8, per 1,000 added lines" },
-              { key: "sonar_maintainability", label: "Sonar R/S/M", num: true, wide: true, title: "Open SonarQube issues: reliability / security / maintainability", render: sonar },
             ]}
           />
         )}

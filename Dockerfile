@@ -1,4 +1,4 @@
-# gg portal: FastAPI app + sync worker, with git, Node (dependency-cruiser) and sonar-scanner.
+# gg portal: FastAPI app + sync worker, with git and Node (dependency-cruiser).
 FROM node:22-bookworm-slim AS node
 
 # The web frontend (Astro + shadcn/ui), built to static files the portal serves
@@ -10,19 +10,11 @@ COPY web ./
 RUN npm run build
 
 FROM python:3.11-slim-bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends git curl unzip ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
-
-# sonar-scanner with its own JRE, so the image needs no Java
-ARG SCANNER=8.1.0.6389
-RUN curl -fsSL -o /tmp/scanner.zip \
-      https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER}-linux-x64.zip \
-    && unzip -q /tmp/scanner.zip -d /opt && mv /opt/sonar-scanner-${SCANNER}-linux-x64 /opt/sonar-scanner \
-    && rm /tmp/scanner.zip
-ENV PATH=/opt/sonar-scanner/bin:$PATH
 
 WORKDIR /app
 COPY requirements.txt package.json package-lock.json ./

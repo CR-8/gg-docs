@@ -1,6 +1,6 @@
 """Secrets at rest and credentials in transit.
 
-seal/unseal: provider tokens, LLM and Sonar keys, integration keys and the legacy MCP token are stored encrypted
+seal/unseal: provider tokens, LLM keys, integration keys and the legacy MCP token are stored encrypted
 (Fernet: AES-128-CBC + HMAC-SHA256) with a key that is not in the database: TOKEN_ENCRYPTION_KEY, or a key file
 created once in DATA_DIR (a different volume from MongoDB's). mint/digest: credentials the portal issues are random
 (256 bits) and stored only as SHA-256 digests, so a database dump can't be replayed.

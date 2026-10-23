@@ -63,10 +63,6 @@ if ! probe; then
 fi
 echo "containers reach the internet"
 
-say "Kernel setting SonarQube needs"
-echo 'vm.max_map_count=524288' | $SUDO tee /etc/sysctl.d/99-sonarqube.conf >/dev/null
-$SUDO sysctl -q -w vm.max_map_count=524288
-
 say "Code"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
 if [ -f "$HERE/docker-compose.yml" ]; then
@@ -86,18 +82,16 @@ setkv() { if grep -q "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else echo 
 fill() { [ -n "$(getkv "$1")" ] || setkv "$1" "$2"; }          # only when still empty
 setkv PUBLIC_URL "https://$DOMAIN"                                # follows the IP on every run
 setkv DOMAIN "$DOMAIN"
-setkv BIND_ADDR 127.0.0.1                                         # 7000/7010 stay private; Caddy serves 443
-setkv SONAR_PUBLIC_URL "https://$DOMAIN/sonar"
+setkv BIND_ADDR 127.0.0.1                                         # 7000 stays private; Caddy serves 443
 fill SESSION_SECRET "$(openssl rand -hex 32)"
 fill TOKEN_ENCRYPTION_KEY "$(openssl rand -hex 32)"
-fill SONAR_DB_PASSWORD "$(openssl rand -hex 24)"
 fill GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 32)"
 for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS EXTRA_REPOS \
          SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_FROM; do
   if [ -n "${!k:-}" ]; then setkv "$k" "${!k}"; fi
 done
 
-# Local model: pick the biggest Qwen2.5-Coder Q8 that fits next to SonarQube (~3 GB) and the portal (~2 GB).
+# Local model: pick the biggest Qwen2.5-Coder Q8 that leaves room for the portal, MongoDB and image builds.
 LLM_TAG=""
 if [ "${LOCAL_LLM:-}" = "off" ]; then
   setkv COMPOSE_PROFILES https
@@ -181,7 +175,6 @@ if [ -n "$(getkv GITHUB_APP_ID)" ] && $SUDO test -f secrets/github-app.pem; then
 cat <<EOF
 
 Portal     https://$DOMAIN   (Continue with GitHub, create a workspace, import repositories)
-SonarQube  https://$DOMAIN/sonar   (first login admin / admin, then change it)
 MCP        each workspace has its own: Settings -> Connect a coding agent
 EOF
 if [ -n "$(getkv SMTP_HOST)" ]; then echo "Invites    emailed through $(getkv SMTP_HOST)"

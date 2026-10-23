@@ -5,8 +5,8 @@ generated files are under data/workspaces/<id>/. WORKSPACE says which tenant the
 every per-tenant path and query reads it, so code that runs outside a tenant fails loudly instead of touching
 someone else's data.
 
-All configuration is environment variables (see .env.example); LLM keys, the Sonar token and integration keys are
-set by workspace admins in the Settings page and stored encrypted (secret.py).
+All configuration is environment variables (see .env.example); LLM keys and integration keys are set by
+workspace admins in the Settings page and stored encrypted (secret.py).
 """
 import contextvars
 import json
@@ -32,9 +32,6 @@ GIT_URL = os.environ.get("GIT_URL_TEMPLATE", "https://github.com/{repo}.git")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:7000").rstrip("/")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "300"))
 BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "90"))
-SONAR_URL = os.environ.get("SONAR_URL", "http://localhost:7010").rstrip("/")  # how the portal reaches Sonar
-SONAR_PUBLIC_URL = os.environ.get("SONAR_PUBLIC_URL", "").rstrip("/")          # the link people click
-SONAR_KEYS = ("gg-backend", "gg-frontend")  # build.py's project keys, for the views pair
 
 WORKSPACE = contextvars.ContextVar("workspace")  # id of the tenant; no default on purpose
 

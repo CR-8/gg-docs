@@ -30,7 +30,7 @@ client = MongoClient(URI, serverSelectionTimeoutMS=int(os.environ.get("MONGODB_T
                      tz_aware=True, connect=False, appname="gg-docs")
 mongo = client.get_default_database("gg-docs")
 
-SECRET_SETTINGS = ("llm_api_key", "sonar_token")
+SECRET_SETTINGS = ("llm_api_key",)
 LEGACY_SQLITE = ("control.db", "portal.db")
 
 
@@ -99,10 +99,9 @@ class Tenant:
 
 
 # Tenant data. The chatbot's query tool may read QUERYABLE (settings, integrations and workflows hold configuration).
-QUERYABLE = ("commits", "identities", "pushes", "pulls", "checks", "breakages", "reviews", "findings", "sonar_issues",
-             "docs", "doc_versions", "events")
-(commits, identities, pushes, pulls, checks, breakages, reviews, findings, sonar_issues, docs, doc_versions,
- events) = map(Tenant, QUERYABLE)
+QUERYABLE = ("commits", "identities", "pushes", "pulls", "checks", "breakages", "reviews", "findings", "docs",
+             "doc_versions", "events")
+(commits, identities, pushes, pulls, checks, breakages, reviews, findings, docs, doc_versions, events) = map(Tenant, QUERYABLE)
 settings, integrations, workflows = Tenant("settings"), Tenant("integrations"), Tenant("workflows")
 TENANT = QUERYABLE + ("settings", "integrations", "workflows")
 
@@ -147,7 +146,6 @@ INDEXES = {
     "reviews": [([(W, 1), ("id", 1)], UNIQUE), ([(W, 1), ("repo", 1), ("pr", 1), ("branch", 1), ("head_sha", 1)], UNIQUE),
                 ([(W, 1), ("repo", 1), ("head_sha", 1)], {})],
     "findings": [([(W, 1), ("id", 1)], UNIQUE), ([(W, 1), ("review_id", 1)], {}), ([(W, 1), ("person", 1)], {})],
-    "sonar_issues": [([(W, 1), ("taken_on", 1), ("repo", 1), ("author_email", 1), ("quality", 1)], UNIQUE)],
     "docs": [([(W, 1), ("repo", 1), ("slug", 1)], UNIQUE)],
     "doc_versions": [([(W, 1), ("id", 1)], UNIQUE), ([(W, 1), ("repo", 1), ("slug", 1), ("id", 1)], {})],
     "events": [([(W, 1), ("id", 1)], UNIQUE)],
@@ -164,7 +162,6 @@ checks {repo, sha, name, conclusion, completed_at, url}
 breakages {id, repo, branch, check_name, broken_sha, last_good_sha, person, pusher, broken_at, fixed_sha (null while open), fixed_at}
 reviews {id, repo, pr (0 = direct push), branch ('' for a PR), title, author, base_sha, head_sha, model, summary, status, posted_url, created_at}
 findings {id, review_id (-> reviews.id), path, line, severity critical|major|minor|nit, category bug|security|perf|test-gap|slop, title, body, sha, person}
-sonar_issues {taken_on, repo, author_email, quality reliability|security|maintainability, count}
 docs {repo, slug, kind, title, summary, content, head_sha, model, generated_at, status, error}
 doc_versions {id, repo, slug, head_sha, content, generated_at, model}
 events {id, at, kind, detail, ok 0|1}"""

@@ -25,7 +25,7 @@ type OverviewData = {
 }
 type Ci = { total: number; passed: number; failed: number }
 type Summary = {
-  repos: string[]; ci: Partial<Record<Side, Ci>>; open_breakages: number; sonar_url: string | null; views: boolean
+  repos: string[]; ci: Partial<Record<Side, Ci>>; open_breakages: number; views: boolean
   worker: { queued: number; pending: string[] }; github: "app" | "token" | null; llm: boolean; llm_model: string
   docs_writing: boolean; sync_error: string | null
 }
@@ -266,7 +266,6 @@ function Spotlight({ data, summary }: { data: OverviewData | null | undefined; s
         <p className="text-inverse-foreground/70 mt-2 text-xs text-pretty">Modules, import maps and every route of the backend and frontend, as one Markdown file.</p>
         <div className="mt-auto flex min-h-16 gap-2 pt-5">
           {data && <a href="/site/ARCHITECTURE.md" download className={round} aria-label="Download ARCHITECTURE.md" title="Download ARCHITECTURE.md"><Download className="size-4" /></a>}
-          {summary.sonar_url && <a href={summary.sonar_url} target="_blank" rel="noreferrer" className={round} aria-label="Open SonarQube" title="SonarQube"><ArrowUpRight className="size-4" /></a>}
         </div>
       </div>
     )
