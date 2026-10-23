@@ -42,6 +42,41 @@ export function GitHubAccount({ me }: { me: NonNullable<Me> }) {
   )
 }
 
+type GGOpsMe = {
+  enabled: boolean; connected: boolean; name?: string | null; email?: string | null; error?: string
+  workspaces?: { name: string; slug: string; role: string }[]
+}
+
+/** This person's own GG-Ops account: the portal reads GG-Ops as them, so they see what GG-Ops shows them. */
+export function GGOpsAccount() {
+  const d = useApi<GGOpsMe>("/api/v1/integrations/gg-ops/me")
+  const [msg, act] = useAct(d.reload)
+  const error = new URLSearchParams(location.search).get("ggops_error")
+  const a = d.data
+  if (!a?.enabled) return null
+  const disconnect = () => confirm("Disconnect GG-Ops? The portal stops reading GG-Ops as you, and the connection is revoked in GG-Ops.") &&
+    act(() => post("/api/v1/integrations/gg-ops/me", undefined, "DELETE"), "Disconnected.")
+  return (
+    <Section title="Your GG-Ops account" description="Read-only, as you: linked GG-Ops projects show only what GG-Ops lets you see.">
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        {a.connected ? (
+          <>
+            <span className="font-medium">{a.name || "Connected"}</span>
+            {a.email && <span className="text-muted-foreground text-xs">{a.email}</span>}
+            {a.workspaces && <span className="text-muted-foreground text-xs">{a.workspaces.map((w) => w.name).join(", ") || "No GG-Ops workspaces"}</span>}
+          </>
+        ) : <span className="text-muted-foreground">Not connected</span>}
+        <span className="ml-auto flex gap-2">
+          {a.connected
+            ? <Button size="sm" variant="ghost" onClick={disconnect}>Disconnect</Button>
+            : <Button size="sm" asChild><a href="/connect/ggops">Connect GG-Ops</a></Button>}
+        </span>
+      </div>
+      {(msg || a.error || error) && <Note>{msg || a.error || error}</Note>}
+    </Section>
+  )
+}
+
 type Repo = {
   id: string; repo: string; status: string; status_detail: string | null; visibility: string | null
   default_branch: string | null; checked_at: string | null; html_url: string | null

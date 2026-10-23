@@ -490,6 +490,22 @@ and knowing an id gets a caller nothing unless it is linked to their workspace. 
 task counts, not task contents. Timeouts, bounded retries (3 attempts on connection errors, 429 and 5xx), and a
 revoked key shows up as status `unauthorized` instead of failing the page.
 
+**Your own GG-Ops account.** With `GGOPS_URL` and `GGOPS_CLIENT_ID` set, the portal is an OAuth client of GG-Ops
+(PKCE, scope `read`, no client secret) and people connect their own account: Settings → Your GG-Ops account, or
+GG-Ops's "Open in GG-Docs" link to `/connect/ggops`. A person's workflow reads then go out with their own token, so
+they see what GG-Ops shows *them*, and someone who hasn't connected sees no GG-Ops data; API clients act as no person
+and keep the workspace's key. Tokens are stored encrypted per person; an access token is refreshed a minute before it
+expires, one refresh at a time per person and never retried blind (GG-Ops revokes a connection whose old refresh
+token is used twice). Revoked in GG-Ops, or unused for 90 days, the person is asked to connect again. Register the
+portal once in GG-Ops: `curl -X POST https://<ggops>/oauth/register -H 'content-type: application/json' -d
+'{"client_name":"GG-Docs","redirect_uris":["https://<domain>/connect/ggops/callback"]}'`.
+
+| Endpoint | Who | What |
+|---|---|---|
+| `GET /connect/ggops` · `GET /connect/ggops/callback` | a signed-in person | Connect (consent in GG-Ops); straight to Settings when connected |
+| `GET /api/v1/integrations/gg-ops/me` | a signed-in person | Their connection and the GG-Ops workspaces it sees |
+| `DELETE /api/v1/integrations/gg-ops/me` | a signed-in person | Disconnect: forgotten here and revoked in GG-Ops |
+
 **gg-pulse.** Its only HTTP API is `GET /api/health` (no authentication), so the integration is a connectivity check:
 `connected`, `degraded` (gg-pulse is up, its database isn't) or `unavailable`. It has no analytics API to read yet, so
 the portal shows none.

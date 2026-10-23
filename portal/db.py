@@ -1,7 +1,7 @@
 """MongoDB storage (MONGODB_URI): one database for every workspace.
 
-Control collections (users, github_accounts, workspaces, members, invites, repos, api_clients, access_tokens,
-login_handoffs, audit_events, rate_limits, counters, migrations) are global. Every other collection is tenant data:
+Control collections (users, github_accounts, ggops_connections, workspaces, members, invites, repos, api_clients,
+access_tokens, login_handoffs, audit_events, rate_limits, counters, migrations) are global. Every other collection is tenant data:
 each document carries workspace_id, and code reaches it only through Tenant, which adds the current WORKSPACE to every
 filter, write and pipeline. Outside a workspace WORKSPACE.get() raises, so nothing can read across tenants by accident.
 
@@ -107,10 +107,10 @@ settings, integrations, workflows = Tenant("settings"), Tenant("integrations"), 
 TENANT = QUERYABLE + ("settings", "integrations", "workflows")
 
 # Control data
-(users, github_accounts, workspaces, members, invites, repo_links, api_clients, access_tokens, login_handoffs,
- audit_events, rate_limits, counters, migrations) = (mongo[n] for n in (
-    "users", "github_accounts", "workspaces", "members", "invites", "repos", "api_clients", "access_tokens",
-    "login_handoffs", "audit_events", "rate_limits", "counters", "migrations"))
+(users, github_accounts, ggops_connections, workspaces, members, invites, repo_links, api_clients, access_tokens,
+ login_handoffs, audit_events, rate_limits, counters, migrations) = (mongo[n] for n in (
+    "users", "github_accounts", "ggops_connections", "workspaces", "members", "invites", "repos", "api_clients",
+    "access_tokens", "login_handoffs", "audit_events", "rate_limits", "counters", "migrations"))
 
 W = "workspace_id"
 UNIQUE = {"unique": True}
@@ -118,6 +118,7 @@ INDEXES = {
     "users": [([("github_id", 1)], {"unique": True, "partialFilterExpression": {"github_id": {"$gt": 0}}}),
               ([("login_lower", 1)], {})],
     "github_accounts": [([("user_id", 1)], UNIQUE), ([("github_id", 1)], UNIQUE)],
+    "ggops_connections": [([("user_id", 1)], UNIQUE)],
     "workspaces": [([("mcp_token_hash", 1)], {"unique": True,
                                                "partialFilterExpression": {"mcp_token_hash": {"$type": "string"}}})],
     # bound memberships are unique per user; pending ones (made before the person first signed in) per login
@@ -191,6 +192,10 @@ def init():
     if legacy_sqlite() and not migrations.find_one({"_id": "sqlite", "status": "applied"}):
         raise RuntimeError(f"{', '.join(map(str, legacy_sqlite()))}: SQLite data that is not in MongoDB yet. Run "
                            "`python -m portal.migrate` (a dry run), then `python -m portal.migrate --apply`.")
+    # GG-Ops keeps `users` and `workspaces` too, with unique indexes (email, slug) that the portal's documents break
+    if {"workspacemembers", "oauthgrants"} & set(mongo.list_collection_names()):
+        raise RuntimeError(f"MONGODB_URI names GG-Ops's database ({mongo.name}). Give the portal its own database on "
+                           "the same cluster, e.g. mongodb+srv://user:pass@cluster/gg-docs.")
     DATA.mkdir(parents=True, exist_ok=True)
     for name, specs in INDEXES.items():
         for keys, opts in specs:

@@ -1,10 +1,14 @@
 """GitHub-first sign-in, repository access, API clients, login handoff, integrations, MongoDB and the SQLite
 migration. GitHub, GG-Ops and gg-pulse are stubbed; MongoDB is real (conftest.py)."""
+import base64
 import contextvars
+import hashlib
 import json
 import sqlite3
+import threading
+import time
 from datetime import timedelta
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, unquote, urlsplit
 
 import httpx
 import pytest
@@ -416,6 +420,160 @@ def test_gg_pulse_is_a_health_check_with_bounded_retries(services):
 
 
 # ---------- the legacy MCP token ----------
+
+# ---------- a person's own GG-Ops account ----------
+
+OPS = "https://ops.example.com"
+
+
+def s256(verifier):
+    return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+
+
+@pytest.fixture
+def ggops(monkeypatch):
+    """GG-Ops's OAuth server and API as the portal meets them: the refresh token rotates on every use, and a second
+    use of an old one revokes the whole grant (exchange-token.ts in GG-Ops)."""
+    s = {"n": 0, "access": None, "refresh": None, "used": set(), "revoked": False, "challenge": None, "refreshes": 0,
+         "revokes": []}
+
+    def mint():
+        s["n"] += 1
+        s["access"], s["refresh"] = f"ggops_sk_a{s['n']}", f"r{s['n']}"
+        return httpx.Response(200, json={"access_token": s["access"], "refresh_token": s["refresh"],
+                                         "token_type": "Bearer", "expires_in": 3600, "scope": "read"})
+
+    def found(data):
+        return httpx.Response(200, json={"ok": True, "data": data})
+
+    def handler(request):
+        path = request.url.path
+        form = dict(parse_qsl(request.content.decode())) if request.method == "POST" else {}
+        if path == "/oauth/token":
+            assert form["client_id"] == "mcp_test"
+            if form["grant_type"] == "authorization_code":
+                if form["code"] != "good-code" or form["redirect_uri"] != "http://localhost:7000/connect/ggops/callback" \
+                        or s256(form["code_verifier"]) != s["challenge"]:
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                s["revoked"] = False  # a new grant
+                return mint()
+            s["refreshes"] += 1
+            time.sleep(0.2)  # slow enough that a second refresh would overlap this one
+            s["revoked"] = s["revoked"] or form["refresh_token"] in s["used"]
+            if s["revoked"] or form["refresh_token"] != s["refresh"]:
+                return httpx.Response(400, json={"error": "invalid_grant"})
+            s["used"].add(form["refresh_token"])
+            return mint()
+        if path == "/oauth/revoke":
+            s["revokes"].append(form["token"])
+            s["revoked"] = s["revoked"] or form["token"] == s["refresh"]
+            return httpx.Response(200)
+        if s["revoked"] or request.headers.get("authorization") != f"Bearer {s['access']}":
+            return httpx.Response(401, json={"ok": False, "error": "Unauthorized"})
+        if path == "/api/v1/me":
+            return found({"id": "u1", "name": "Alice Ops", "email": "alice@acme.example"})
+        if path == "/api/v1/workspaces":
+            return found([{"id": "w", "name": "Acme Ops", "slug": "acme", "role": "MEMBER"}])
+        if path == f"/api/v1/projects/{PID}/tasks":
+            return found(BOARD)
+        return httpx.Response(404, json={"ok": False, "error": "Not found"})
+
+    monkeypatch.setattr(integrations, "HTTP", httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(integrations, "BACKOFF", 0)
+    monkeypatch.setattr(integrations, "GGOPS_URL", OPS)
+    monkeypatch.setattr(integrations, "GGOPS_CLIENT_ID", "mcp_test")
+    yield s
+    db.ggops_connections.delete_many({})
+    with workspace(WS):
+        db.workflows.delete({})
+
+
+def connect_ggops(c, s, **answer):
+    """/connect/ggops, GG-Ops's consent (stubbed: approved, or `answer` overrides), the callback; where it lands."""
+    to = urlsplit(c.get("/connect/ggops", follow_redirects=False).headers["location"])
+    if to.netloc != "ops.example.com":
+        return to.path
+    q = parse_qs(to.query)
+    s["challenge"] = q["code_challenge"][0]
+    params = {"code": "good-code", "state": q["state"][0], "iss": OPS, **answer}
+    return unquote(c.get("/connect/ggops/callback", params=params, follow_redirects=False).headers["location"])
+
+
+def test_people_read_gg_ops_as_themselves(ggops):
+    alice_id = db.users.find_one({"github_id": 1})["_id"]
+    with workspace(WS):
+        for pid in (PID, PID2):
+            db.workflows.upsert({"workflow_id": pid}, {"name": pid[:3], "service": "gg-ops", "status": "connected"})
+    with client() as alice, client() as anon:
+        # GG-Ops's "Open in GG-Docs" works signed out: sign-in first, and its query survives
+        assert anon.get("/connect/ggops?workspace=acme", follow_redirects=False).headers["location"] == \
+            "/auth/login?next=/connect/ggops%3Fworkspace%3Dacme"
+
+        sign_in(alice, "alice")
+        to = urlsplit(alice.get("/connect/ggops", follow_redirects=False).headers["location"])
+        q = parse_qs(to.query)
+        assert f"{to.scheme}://{to.netloc}{to.path}" == f"{OPS}/oauth/authorize"
+        assert q["client_id"] == ["mcp_test"] and q["scope"] == ["read"] and q["code_challenge_method"] == ["S256"]
+        assert q["redirect_uri"] == ["http://localhost:7000/connect/ggops/callback"]
+
+        # not connected: no GG-Ops data at all, and no falling back to the workspace's key
+        r = alice.get(f"/api/v1/integrations/workflows/{PID}")
+        assert r.status_code == 403 and "Connect your GG-Ops account" in r.json()["error"]
+
+        # denied, another issuer, a code GG-Ops won't swap: nothing stored
+        assert "didn't allow" in connect_ggops(alice, ggops, error="access_denied")
+        assert "did not come from" in connect_ggops(alice, ggops, iss="https://evil.example")
+        assert "Connect GG-Ops again" in connect_ggops(alice, ggops, code="stolen")
+        assert db.ggops_connections.count_documents({}) == 0
+
+        assert connect_ggops(alice, ggops) == "/settings/"
+        raw = db.ggops_connections.find_one({"user_id": alice_id})
+        assert raw["access_token"].startswith("v1:") and "ggops_sk_a" not in json.dumps(raw, default=str)
+        me = alice.get("/api/v1/integrations/gg-ops/me").json()
+        assert me["connected"] and me["name"] == "Alice Ops" and me["workspaces"] == [{"name": "Acme Ops", "slug": "acme", "role": "MEMBER"}]
+        assert alice.get("/connect/ggops", follow_redirects=False).headers["location"] == "/settings/"  # straight in
+
+        # reads go out as her: what GG-Ops doesn't show her is a 404, and her view isn't written as the workspace's
+        assert alice.get(f"/api/v1/integrations/workflows/{PID}").json()["project"]["tasks"]["total"] == 3
+        assert alice.get(f"/api/v1/integrations/workflows/{PID2}").status_code == 404
+        with workspace(WS):
+            assert db.workflows.one({"workflow_id": PID2})["status"] == "connected"
+
+        # two requests at expiry: one refresh, both use its token, and the grant survives
+        db.ggops_connections.update_one({"user_id": alice_id}, {"$set": {"expires_at": 0}})
+        got = []
+        threads = [threading.Thread(target=lambda: got.append(integrations.access_token(alice_id))) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert ggops["refreshes"] == 1 and got == [ggops["access"]] * 2 and not ggops["revoked"]
+
+        # an access token GG-Ops refuses early is refreshed once
+        ggops["access"] = "gone"
+        assert alice.get(f"/api/v1/integrations/workflows/{PID}").status_code == 200 and ggops["refreshes"] == 2
+
+        # revoked in GG-Ops: the tokens are forgotten and she is asked to connect again
+        ggops["revoked"] = True
+        r = alice.get(f"/api/v1/integrations/workflows/{PID}")
+        assert r.status_code == 403 and "Connect GG-Ops again" in r.json()["error"]
+        assert alice.get("/api/v1/integrations/gg-ops/me").json()["connected"] is False
+
+        # disconnect: forgotten here and revoked in GG-Ops
+        assert connect_ggops(alice, ggops) == "/settings/"
+        refresh = ggops["refresh"]
+        assert alice.delete("/api/v1/integrations/gg-ops/me").json() == {"ok": True, "revoked_in_ggops": True}
+        assert ggops["revokes"][-1] == refresh and db.ggops_connections.count_documents({}) == 0
+
+
+def test_gg_ops_database_is_refused():
+    db.mongo.create_collection("oauthgrants")
+    try:
+        with pytest.raises(RuntimeError, match="GG-Ops's database"):
+            db.init()
+    finally:
+        db.mongo.drop_collection("oauthgrants")
+
 
 def test_legacy_mcp_token_can_be_rotated_and_turned_off():
     ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}

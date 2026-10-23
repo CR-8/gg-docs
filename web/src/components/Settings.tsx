@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react"
 import { Cpu, Hammer, Mail, Plug, RefreshCw, Users, X } from "lucide-react"
 import { bytes, post, useApi, useMe, type Role } from "@/lib/api"
 import { Choice, DataTable, Field, Loading, Note, Section, Snippet, Tag, Time } from "@/components/common"
-import { ApiClients, ConnectedRepos, GitHubAccount, Services } from "@/components/Integrations"
+import { ApiClients, ConnectedRepos, GGOpsAccount, GitHubAccount, Services } from "@/components/Integrations"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -465,6 +465,7 @@ export function Settings() {
         {me?.workspace && <ConnectedRepos admin={admin} workspace={me.workspace.id} />}
       </div>
       {me && <GitHubAccount me={me} />}
+      {me && <GGOpsAccount />}
       <Services admin={admin} />
       <ApiClients admin={admin} />
       <Mcp admin={admin} />

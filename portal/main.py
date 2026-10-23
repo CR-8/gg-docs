@@ -38,7 +38,8 @@ WEB = ROOT / "web" / "dist"  # the Astro frontend: cd web && npm run build
 # token endpoint takes client credentials, /auth/handoff a single-use code.
 PUBLIC = ("/auth/", "/webhook/github", "/healthz", "/login", "/_astro/", "/favicon.svg", "/mcp", "/invite/",
           "/api/v1/auth/token")
-NO_WORKSPACE = ("/api/me", "/api/workspaces", "/api/invites/", "/welcome", "/api/v1/")  # before creating or joining one
+NO_WORKSPACE = ("/api/me", "/api/workspaces", "/api/invites/", "/welcome", "/api/v1/",  # before creating or joining one
+                "/connect/")
 # owner/name; neither part "." or "..", which would put the clone outside the workspace's repos folder
 REPO_NAME = re.compile(r"^(?!\.{1,2}/)[A-Za-z0-9_.-]+/(?!\.{1,2}$)[A-Za-z0-9_.-]+$")
 # What people paste: https://github.com/o/n(.git)(/tree/...), git@github.com:o/n.git, or o/n. GitHub account names
@@ -127,7 +128,8 @@ async def require_login(request: Request, call_next):
     if not user:
         if path.startswith("/api/"):
             return JSONResponse({"error": "login required"}, status_code=401)
-        return RedirectResponse(f"/auth/login?next={quote(path)}")
+        query = request.url.query  # kept: /connect/ggops?workspace=… must survive the sign-in
+        return RedirectResponse(f"/auth/login?next={quote(path + ('?' + query if query else ''))}")
     pin = request.session.get("pin")  # a session an API client opened (login handoff) stays in its workspace
     rows = await run_in_threadpool(db.memberships, user["id"])
     request.state.workspaces = rows = [w for w in rows if not pin or w["id"] == pin]
@@ -255,6 +257,49 @@ def handoff(request: Request, code: str = ""):
                            **({"pin": h["workspace_id"]} if h["created_by"].startswith("client:") else {}))
     db.audit("handoff.redeemed", u["login"], workspace=h["workspace_id"], created_by=h["created_by"])
     return RedirectResponse(h["next"], 303, headers={"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"})
+
+
+# ---------- a person's own GG-Ops account ----------
+
+def to_settings(error=""):
+    """Settings shows `ggops_error` beside "Your GG-Ops account"."""
+    return RedirectResponse("/settings/" + (f"?ggops_error={quote(error)}" if error else ""), 303)
+
+
+@app.get("/connect/ggops")
+def connect_ggops(request: Request):
+    """GG-Ops's "Open in GG-Docs" button. Connected already: straight in. Otherwise GG-Ops's consent screen, with a
+    one-time state and a PKCE challenge (GG-Ops issues no client secrets, so PKCE is the proof)."""
+    if not integrations.ggops_oauth():
+        return to_settings("GG-Ops sign-in is not set up on this portal (GGOPS_URL and GGOPS_CLIENT_ID).")
+    user = current_user(request)
+    if db.ggops_connections.find_one({"user_id": user["id"]}):
+        return to_settings()
+    state, (verifier, challenge) = secrets.token_urlsafe(24), pkce()
+    request.session["ggops_oauth"] = {"state": state, "verifier": verifier, "at": int(time.time())}
+    return RedirectResponse(integrations.authorize_url(state, challenge))
+
+
+@app.get("/connect/ggops/callback")
+def connect_ggops_callback(request: Request, code: str = "", state: str = "", iss: str = "", error: str = ""):
+    """The state is used up whatever happens; the tokens are stored only once state, its age and the issuer check out
+    and GG-Ops has swapped the code."""
+    saved = request.session.pop("ggops_oauth", None) or {}
+    if error:
+        return to_settings("You didn't allow GG-Docs to read GG-Ops." if error == "access_denied"
+                           else f"GG-Ops refused the connection ({error[:60]}).")
+    if not (code and saved.get("state") and secrets.compare_digest(state, saved["state"])) \
+            or time.time() - saved.get("at", 0) > OAUTH_STATE_SECONDS:
+        return to_settings("The GG-Ops connection expired. Try again.")
+    if iss.rstrip("/") != integrations.GGOPS_URL:  # RFC 9207: the answer comes from the GG-Ops we sent them to
+        return to_settings("That answer did not come from this portal's GG-Ops.")
+    user = current_user(request)
+    try:
+        integrations.connect(user["id"], code, saved["verifier"])
+    except integrations.ServiceError as e:
+        return to_settings(str(e))
+    db.audit("ggops.connected", user["login"])
+    return to_settings()
 
 
 # ---------- workspaces ----------
@@ -1201,7 +1246,8 @@ def disconnect_repository(ws: int, rid: str, request: Request):
     return {"ok": True, "repo": r["repo"]}
 
 
-SERVICE_ERRORS = {"invalid": 400, "not_configured": 404, "not_found": 404}
+# not 401/409 for a person's own GG-Ops account: the web app reads those as "sign in" and "no workspace"
+SERVICE_ERRORS = {"invalid": 400, "not_configured": 404, "not_found": 404, "not_connected": 403, "reconnect": 403}
 
 
 def service_call(fn, *args):
@@ -1267,15 +1313,39 @@ def remove_workflow(workflow_id: str, request: Request):
 
 @app.get("/api/v1/integrations/workflows/{workflow_id}")
 def workflow(workflow_id: str, request: Request):
-    """A linked workflow's GG-Ops project status and task counts, read now with the workspace's GG-Ops key. Knowing a
-    workflow id grants nothing: it must be linked to the caller's workspace (and to the client, if it is bound)."""
+    """A linked workflow's GG-Ops project status and task counts, read now: as the person (their own GG-Ops account)
+    when GG-Ops sign-in is set up, else and for API clients with the workspace's GG-Ops key. Knowing a workflow id
+    grants nothing: it must be linked to the caller's workspace (and to the client, if it is bound)."""
     p = need(request, "workflow:read")
     w = db.workflows.one({"workflow_id": workflow_id.lower()})
     if not w or (p["type"] == "client" and p.get("workflow_id") and p["workflow_id"] != w["workflow_id"]):
         raise HTTPException(404, "no such workflow in this workspace")
+    if p["type"] == "user" and integrations.ggops_oauth():  # a person reads as themselves; programs keep the key
+        board = service_call(integrations.user_board, p["id"], w["workflow_id"])
+        return {"workflow": integrations.workflow_view(w), "project": integrations.summarize(board)}
     board = service_call(integrations.check_workflow, w["workflow_id"])
     return {"workflow": integrations.workflow_view(db.workflows.one({"workflow_id": w["workflow_id"]})),
             "project": integrations.summarize(board)}
+
+
+@app.get("/api/v1/integrations/gg-ops/me")
+def ggops_account(request: Request):
+    """The caller's own GG-Ops connection and the GG-Ops workspaces it sees, read now through GG-Ops."""
+    p = need_person(request)
+    if not integrations.ggops_oauth():
+        return {"enabled": False, "connected": False}
+    try:
+        return {"enabled": True, **integrations.account(p["id"])}
+    except integrations.ServiceError as e:
+        return {"enabled": True, "connected": e.status not in ("not_connected", "reconnect"), "error": str(e)}
+
+
+@app.delete("/api/v1/integrations/gg-ops/me")
+def ggops_disconnect(request: Request):
+    p = need_person(request)
+    revoked = integrations.disconnect(p["id"])
+    db.audit("ggops.disconnected", p["login"], revoked_in_ggops=revoked)
+    return {"ok": True, "revoked_in_ggops": revoked}
 
 
 @app.get("/api/v1/clients")
