@@ -3,11 +3,18 @@ Claude-compatible (official `anthropic` SDK) and OpenAI-compatible (official `op
 own base URL, key and model. Conversation keeps each provider's native message list, so assistant turns
 (including Claude's thinking blocks) go back to the API unchanged inside a tool loop."""
 import json
+import os
 from dataclasses import dataclass, field
 
 from . import db
 
-DEFAULTS = {"llm_kind": "anthropic", "llm_base_url": "", "llm_model": "claude-opus-5-5", "llm_effort": "high"}
+# Defaults come from the environment (install.sh points them at the local model when LOCAL_LLM is used);
+# anything an admin saves in Settings overrides them.
+env = lambda key, default: os.environ.get(key) or default  # blank in .env counts as unset
+DEFAULTS = {"llm_kind": env("LLM_KIND", "anthropic"), "llm_base_url": env("LLM_BASE_URL", ""),
+            "llm_model": env("LLM_MODEL", "claude-opus-5-5"),
+            "llm_effort": env("LLM_EFFORT", "high")}  # Claude only; "(don't send)" is chosen in Settings
+TIMEOUT = float(env("LLM_TIMEOUT", "600"))  # seconds; a local CPU model needs far longer than an API
 OFFICIAL_ANTHROPIC = {"", "https://api.anthropic.com", "https://api.anthropic.com/"}
 # Models that take server-side refusal fallback ("default" routes by refusal category; Claude API only).
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
@@ -19,12 +26,12 @@ class LLMError(RuntimeError):
 
 def config():
     cfg = {k: db.setting(k, v) for k, v in DEFAULTS.items()}
-    cfg["llm_api_key"] = db.setting("llm_api_key", "")
+    cfg["llm_api_key"] = db.setting("llm_api_key", "") or os.environ.get("LLM_API_KEY", "")
     return cfg
 
 
 def configured():
-    return bool(db.setting("llm_api_key"))
+    return bool(config()["llm_api_key"])
 
 
 @dataclass
@@ -67,10 +74,10 @@ class Conversation:
         base_url = self.cfg.get("llm_base_url") or None
         if self.kind == "anthropic":
             import anthropic
-            self.client = anthropic.Anthropic(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3)
+            self.client = anthropic.Anthropic(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3, timeout=TIMEOUT)
         else:
             import openai
-            self.client = openai.OpenAI(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3)
+            self.client = openai.OpenAI(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3, timeout=TIMEOUT)
 
     def add_user(self, text):
         self.messages.append({"role": "user", "content": text})

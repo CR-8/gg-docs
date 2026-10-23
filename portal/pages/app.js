@@ -17,13 +17,22 @@ export async function api(path, opts = {}) {
   return data;
 }
 
+export const FAVICON = "data:image/svg+xml," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#5bbfa8"/>' +
+  '<text x="16" y="21" font-family="monospace" font-weight="700" font-size="14" text-anchor="middle" fill="#06211b">gg</text></svg>');
+
+// Draws the top bar straight away, then fills in who is signed in.
 export async function nav(active) {
+  if (!document.querySelector("link[rel=icon]")) document.head.insertAdjacentHTML("beforeend", `<link rel="icon" href="${FAVICON}">`);
+  const bar = document.querySelector("nav");
+  bar.innerHTML = `<a class="brand" href="/"><span class="mark">gg</span>GeneGenius</a><div class="links">${
+    NAV.map(([href, name]) => `<a href="${href}"${href === active ? ' class="on"' : ""}>${name}</a>`).join("")}</div><span class="me"></span>`;
   const me = await api("/api/me").catch(() => null);
-  document.querySelector("nav").innerHTML =
-    NAV.map(([href, name]) => `<a href="${href}"${href === active ? ' class="on"' : ""}>${name}</a>`).join("") +
-    (me ? `<span class="me">${h(me.login)}${me.admin ? " (admin)" : ""} &middot; <a href="/auth/logout">sign out</a></span>` : "");
+  if (me) bar.querySelector(".me").innerHTML = `${h(me.login)}${me.admin ? " · admin" : ""} &middot; <a href="/auth/logout">Sign out</a>`;
   return me;
 }
+
+export const empty = (title, text) => `<div class="empty"><b>${h(title)}</b>${h(text)}</div>`;
 
 export function checkChips(checks) {
   if (!checks || !checks.length) return '<span class="muted">no CI yet</span>';

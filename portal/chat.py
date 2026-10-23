@@ -14,7 +14,8 @@ import httpx
 from . import BACKEND_REPO, FRONTEND_REPO, REPOS, SITE, SONAR_KEYS, SONAR_URL, WORK, db, llm, repo_dir
 from .sync import sonar_token
 
-MAX_ROUNDS, MAX_OUT = 10, 20_000
+MAX_ROUNDS = 10
+MAX_OUT = int(os.environ.get("CHAT_TOOL_CHARS") or 20000)  # per tool result; smaller for a local model's context
 
 SYSTEM = """You are the GeneGenius engineering portal assistant. You answer questions about two repositories:
 the backend {backend} (FastAPI) and the frontend {frontend} (Next.js): who pushed what, whose push broke CI,

@@ -1,6 +1,7 @@
 """Diff-only code review, CodeRabbit style: annotated diff -> LLM -> JSON findings -> git blame -> DB,
 then (when enabled in Settings) one PR review with inline comments, posted as the GitHub App."""
 import json
+import os
 import re
 from collections import Counter
 
@@ -12,7 +13,9 @@ SKIP = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.
                   r"|\.(min\.js|min\.css|map|svg|png|jpe?g|gif|ico|pdf|zip|gz|whl|csv|tsv|vcf|bam|parquet|pkl|bin|md|txt)$"
                   r"|(^|/)(vendor|dist|build|node_modules|__snapshots__)/"
                   r"|(^|/)(?!package\.json$|tsconfig[^/]*\.json$)[^/]+\.json$")  # data/results JSON, not config
-CHUNK_CHARS, MAX_CHARS = 150_000, 600_000  # ~40k / ~150k tokens: per request, per review
+# Characters of diff per request and per review (~4 chars a token). install.sh lowers them for a local model.
+CHUNK_CHARS = int(os.environ.get("REVIEW_CHUNK_CHARS") or 150_000)
+MAX_CHARS = int(os.environ.get("REVIEW_MAX_CHARS") or 600_000)
 SEVERITIES = ("critical", "major", "minor", "nit")
 CATEGORIES = ("bug", "security", "perf", "test-gap", "slop")
 

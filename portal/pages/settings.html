@@ -3,40 +3,46 @@
 <title>Settings</title><link rel="stylesheet" href="/static/style.css"></head>
 <body><nav></nav>
 <h1>Settings</h1>
-<p id="who" class="muted"></p>
+<p id="who" class="lede">The model behind reviews and Ask, PR posting, SonarQube, and what the background jobs are doing.</p>
+<div class="cols">
 <form id="f">
-  <h2>LLM for reviews and the chatbot</h2>
-  <div class="field"><label for="kind">API type</label>
-    <select id="kind" name="llm_kind"><option value="anthropic">Claude-compatible (Anthropic Messages API)</option>
-      <option value="openai">OpenAI-compatible (Chat Completions API)</option></select></div>
-  <div class="field"><label for="base">Base URL</label><input id="base" name="llm_base_url">
-    <p class="hint">Leave blank for the provider's own API. For a gateway, proxy or self-hosted server, enter its URL
-      (OpenAI-compatible servers usually end in <code>/v1</code>).</p></div>
-  <div class="field"><label for="key">API key</label><input id="key" name="llm_api_key" type="password" autocomplete="off">
-    <p class="hint">Stored on the portal server and never sent back to the browser. Leave blank to keep the saved key.</p></div>
-  <div class="field"><label for="model">Model</label><input id="model" name="llm_model"></div>
-  <div class="field"><label for="effort">Effort</label>
-    <select id="effort" name="llm_effort"><option value="">(don't send)</option><option>low</option><option>medium</option>
-      <option>high</option><option>xhigh</option><option>max</option></select>
-    <p class="hint">Claude only. Higher means more thorough and more tokens. Use "(don't send)" for models or servers that reject it.</p></div>
-  <div class="row" style="margin-top:12px"><button type="button" id="test">Test connection</button><span id="test-msg" class="muted"></span></div>
-
-  <h2>Review bot</h2>
-  <label style="font-weight:400"><input type="checkbox" name="post_reviews"> Post reviews on GitHub PRs (summary + inline comments, as the GitHub App)</label>
-  <p class="hint">Off: reviews are only stored here and used by the chatbot. Posting needs the GitHub App, or a token that can write pull requests.</p>
-
-  <h2>SonarQube</h2>
-  <div class="field"><label for="sonar">Token</label><input id="sonar" name="sonar_token" type="password" autocomplete="off">
-    <p class="hint">In SonarQube: My Account &rarr; Security &rarr; generate a Global Analysis token. Leave blank to keep the saved one.</p></div>
-
-  <div class="row" style="margin-top:20px"><button class="primary">Save</button><span id="save-msg" class="muted"></span></div>
+  <section class="panel">
+    <h2 style="margin-top:0">Language model</h2>
+    <div class="field"><label for="kind">API type</label>
+      <select id="kind" name="llm_kind"><option value="anthropic">Claude-compatible (Anthropic Messages API)</option>
+        <option value="openai">OpenAI-compatible (OpenAI, Ollama, llama.cpp, vLLM, gateways)</option></select></div>
+    <div class="field"><label for="base">Base URL</label><input id="base" name="llm_base_url" placeholder="blank = the provider's own API">
+      <p class="hint">The local model installed with <code>LOCAL_LLM</code> is <code>http://llm:11434/v1</code>. Other OpenAI-compatible servers usually end in <code>/v1</code>.</p></div>
+    <div class="field"><label for="key">API key</label><input id="key" name="llm_api_key" type="password" autocomplete="off">
+      <p class="hint">Kept on the server, never sent back to the browser. Blank keeps the saved key. A local model accepts any value.</p></div>
+    <div class="field"><label for="model">Model</label><input id="model" name="llm_model"></div>
+    <div class="field"><label for="effort">Effort</label>
+      <select id="effort" name="llm_effort"><option value="">(don't send)</option><option>low</option><option>medium</option>
+        <option>high</option><option>xhigh</option><option>max</option></select>
+      <p class="hint">Claude only. Choose "(don't send)" for other models.</p></div>
+    <div class="row" style="margin:16px 0 0"><button type="button" id="test">Test connection</button><span id="test-msg" class="muted"></span></div>
+  </section>
+  <section class="panel">
+    <h2 style="margin-top:0">Review bot</h2>
+    <label style="font-weight:400;display:flex;gap:10px;align-items:center;margin:0"><input type="checkbox" name="post_reviews" style="width:auto">
+      Post reviews on GitHub PRs (summary and inline comments)</label>
+    <p class="hint">Off: reviews are stored here and used by Ask. Posting needs the GitHub App, or a token that can write pull requests.</p>
+    <h2>SonarQube</h2>
+    <div class="field"><label for="sonar" style="margin-top:0">Token</label><input id="sonar" name="sonar_token" type="password" autocomplete="off">
+      <p class="hint">SonarQube &rarr; My Account &rarr; Security &rarr; Global Analysis token. Blank keeps the saved one.</p></div>
+  </section>
+  <div class="row" style="margin-top:16px"><button class="primary">Save settings</button><span id="save-msg" class="muted"></span></div>
 </form>
-
-<h2>Status</h2>
-<div class="row" id="actions" hidden><button type="button" data-a="sync">Sync from GitHub now</button>
-  <button type="button" data-a="rebuild">Rebuild views now</button><span id="act-msg" class="muted"></span></div>
-<div id="status" class="muted">Loading...</div>
-<h2>Recent jobs</h2><div id="events"></div>
+<div>
+  <section class="panel">
+    <h2 style="margin-top:0">Status</h2>
+    <div id="status"><div class="skel"></div><div class="skel"></div></div>
+    <div class="row" id="actions" hidden style="margin:16px 0 0"><button type="button" data-a="sync">Sync now</button>
+      <button type="button" data-a="rebuild">Rebuild views</button><span id="act-msg" class="muted"></span></div>
+  </section>
+  <h2>Recent jobs</h2><div id="events"></div>
+</div>
+</div>
 <script type="module">
 import {api, nav, h, when, table} from "/static/app.js";
 const me = await nav("/settings");
@@ -58,7 +64,7 @@ async function load() {
   form.elements.llm_model.placeholder = MODEL[s.llm_kind];
   if (!me || !me.admin) {
     [...form.elements].forEach(e => e.disabled = true);
-    document.getElementById("who").textContent = "Only admins can change settings (ADMINS on the server).";
+    document.getElementById("who").textContent = "Only admins can change these. Sign in with the admin password to edit.";
   } else document.getElementById("actions").hidden = false;
 }
 
