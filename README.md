@@ -381,6 +381,14 @@ breakages, people, the code graph, and the generated documentation. Its instruct
   comments). A call is sent once and never retried blind; only a token GG-Ops refuses is refreshed and the call sent
   again. A connection made when the portal asked GG-Ops for `read` only has no write tools until the person chooses
   **Allow task changes** (connect again). Workspace and API-client tokens get no GG-Ops tools.
+- **"Build X, divide the tasks between us."** Two tools are MCP's own. `members` lists the workspace: GitHub login,
+  name, role and the GG-Ops account each person connected. `start_project` (personal token, owners and admins) creates
+  a GitHub repository with the person's own GitHub sign-in (private and with a README by default), imports it here,
+  invites the other members as collaborators, and with `ggops_workspace` creates a GG-Ops project as them (GG-Ops's
+  `create_project`) and links it as a workflow. The agent then splits the work itself, one `ggops_create_task` per
+  task, assigned by GG-Ops email; each person's page (2, People) shows their commits next to those tasks. Creating
+  repositories needs the App's **Administration** permission (3.1), and the App must cover the new repository
+  (installed on *All repositories*), or the tool says to add it and import again.
 - **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
   ```bash
   claude mcp add --transport http gg-pulse https://<domain>/mcp --header "Authorization: Bearer <token>"
@@ -557,7 +565,9 @@ Then, on the app's page:
 2. **Generate a private key**; save the downloaded `.pem` as `secrets/github-app.pem` next to `docker-compose.yml`.
 3. **Install App** → your-org → *Only select repositories* → `backend` and `frontend`.
 
-"Pull requests: write" is only used to post reviews, and only when an admin turns that on. Why each permission:
+"Pull requests: write" is only used to post reviews, and only when an admin turns that on. To let agents start
+projects (1.14, `start_project`), also give **Administration: Read and write**: creating a repository for the person
+and inviting collaborators to it, always with that person's own user token. Why each permission:
 Contents (clone and read code), Metadata (repository details), Checks (CI results for breakages), Pull requests (PRs to
 review, and posting reviews). Signing in reads only the public profile (`GET /user`), which needs no account
 permission. Leave **Expire user authorization tokens** on (the default): user tokens then last 8 hours and are

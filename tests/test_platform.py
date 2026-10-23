@@ -309,7 +309,8 @@ def test_login_handoff_is_single_use_short_lived_and_stays_on_site():
 
 BOARD = {"projectId": PID, "projectName": "Variant pipeline", "projectStatusColor": "AT_RISK", "projectStatusNote": "late",
          "memberCount": 4, "sections": [{"id": "s", "name": "Doing", "position": 0, "tasks": [
-             {"id": "t1", "title": "secret task title", "status": "IN_PROGRESS", "blockedByCount": 1},
+             {"id": "t1", "title": "secret task title", "status": "IN_PROGRESS", "blockedByCount": 1,
+              "assignees": [{"id": "u1", "name": "Alice Ops"}]},
              {"id": "t2", "title": "another", "status": "DONE", "blockedByCount": 0}]}],
          "unsectioned": [{"id": "t3", "title": "x", "status": "TODO", "blockedByCount": 0}]}
 
@@ -479,7 +480,9 @@ def ggops(monkeypatch):
                     tools.append({"name": "create_task", "description": "Create a task", "inputSchema": {"type": "object"}})
                 return httpx.Response(200, json={"jsonrpc": "2.0", "id": rpc["id"], "result": {"tools": tools}})
             s["mcp"].append((rpc["params"]["name"], rpc["params"]["arguments"]))
-            text = json.dumps({"created": rpc["params"]["arguments"]})
+            args = rpc["params"]["arguments"]
+            text = json.dumps({"created": True, "projectId": PID, "project": args["name"]} if rpc["params"]["name"]
+                              == "create_project" else {"created": args})
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": rpc["id"],
                                              "result": {"content": [{"type": "text", "text": text}], "isError": False}})
         if path == "/api/v1/me":
@@ -636,6 +639,82 @@ def test_mcp_agents_use_gg_ops_as_their_person(ggops):
         new = alice.post("/api/settings/mcp/me/rotate").json()["token"]
         assert agent.post(f"/mcp/{token}", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 401
         assert agent.post(f"/mcp/{new}", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
+
+
+def test_agents_start_a_project_and_split_it_between_members(ggops, monkeypatch):
+    """"Build X, divide the tasks between us": members, then start_project makes the repository as the person, invites
+    the others, imports it and makes the GG-Ops project, linked as a workflow; the person's page then finds their
+    GG-Ops tasks. Owners and admins only; a workspace token is no person."""
+    from portal import sync
+    github = []
+
+    class Reply:
+        def __init__(self, code, body=None):
+            self.status_code, self.body = code, body
+
+        def json(self):
+            return self.body
+
+    def request(method, path, check=True, token=None, **kw):
+        github.append((method, path, token, kw.get("json")))
+        if (method, path) == ("POST", "/user/repos"):
+            return Reply(201, gh_repo(f"alice/{kw['json']['name']}", private=kw["json"]["private"]))
+        if method == "PUT":
+            return Reply(201 if path.endswith("/bob") else 404, {"message": "Not Found"})
+        return Reply(200, gh_repo(path.removeprefix("/repos/")))
+
+    monkeypatch.setattr(GitHub, "mode", property(lambda self: "app"))
+    monkeypatch.setattr(gh, "request", request)
+    monkeypatch.setattr(gh, "installation", lambda repo: 1)
+    monkeypatch.setattr(sync, "enqueue", lambda *job: None)
+
+    def call(c, token, tool, **args):
+        r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}},
+                   headers={"Authorization": f"Bearer {token}"}).json()["result"]
+        return r["isError"], r["content"][0]["text"]
+
+    with client() as alice, client() as bob, client() as agent:
+        sign_in(alice, "alice")
+        sign_in(bob, "bob")
+        bob_user = db.user_view(db.users.find_one({"login": "bob"}))
+        db.members.insert_one(db.member_doc(WS, bob_user, "member"))
+        bob.post(f"/api/workspaces/{WS}/switch")
+        assert connect_ggops(alice, ggops) == "/settings/"
+        token, shared = alice.get("/api/settings/mcp/me").json()["token"], alice.get("/api/settings/mcp").json()["token"]
+
+        team = {m["login"]: m for m in json.loads(call(agent, token, "members")[1])}
+        assert team["alice"]["ggops"] == {"name": "Alice Ops", "email": "alice@acme.example"} and team["bob"]["ggops"] is None
+
+        failed, said = call(agent, token, "start_project", name="Team App!", description="A MERN app.", ggops_workspace="acme",
+                            collaborators=["bob", "ghost", "not a login"])
+        out = json.loads(said)
+        assert not failed and out["repository"] == {"name": "alice/Team-App", "url": "https://github.com/alice/Team-App",
+                                                     "private": True}
+        assert github[0] == ("POST", "/user/repos", "t-alice", {"name": "Team-App", "description": "A MERN app.",
+                                                                "private": True, "auto_init": True})
+        assert out["imported"] and "alice/Team-App" in alice.get("/api/summary").json()["repos"]
+        assert out["collaborators"]["invited"] == ["bob"] and set(out["collaborators"]["failed"]) == {"ghost", "not a login"}
+        assert out["ggops"]["created"] and out["ggops"]["linked"]
+        assert ggops["mcp"][-1] == ("create_project", {"workspace": "acme", "name": "Team-App", "description": "A MERN app."})
+        with workspace(WS):
+            assert db.workflows.one({"workflow_id": PID})["repo"] == "alice/Team-App"
+
+        # her page finds her GG-Ops tasks by the account she connected, read as the viewer
+        mine = alice.get("/api/people/alice/tasks").json()
+        assert mine["matched_by"] == "account" and [t["id"] for t in mine["tasks"]] == ["t1"]
+        assert alice.get("/api/people/alice").json()["profile"]["role"] == "owner"
+
+        # a member, and a workspace token, can't start one
+        mine_bob = bob.get("/api/settings/mcp/me").json()["token"]
+        assert call(agent, mine_bob, "start_project", name="x")[0]
+        assert call(agent, shared, "start_project", name="x")[0]
+        tools = agent.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                           headers={"Authorization": f"Bearer {shared}"}).json()["result"]["tools"]
+        assert "members" in [t["name"] for t in tools] and "start_project" not in [t["name"] for t in tools]
+        assert len(github) == 4  # create, read for the import, two invites: nothing from the refused calls
+    with workspace(WS):
+        db.remove_repo("alice/Team-App")
+    db.members.delete_one({"workspace_id": WS, "user_id": bob_user["id"]})
 
 
 def test_gg_ops_database_is_refused():
