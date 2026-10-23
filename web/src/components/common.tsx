@@ -178,9 +178,10 @@ export const Pr = ({ repo, n }: { repo: string; n: number }) => (
     #{n}
   </a>
 )
+export const personHref = (person: string) => `/people/person/?p=${encodeURIComponent(person)}`
 export const Person = ({ name }: { name?: string | null }) =>
   name ? (
-    <a className="link" href={`/people/#${encodeURIComponent(name)}`}>
+    <a className="link" href={personHref(name)}>
       {name}
     </a>
   ) : (

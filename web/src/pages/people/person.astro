@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Profile } from "@/components/Profile"
+---
+
+<Layout title="Person" description="Commits, pull requests, GG-Ops tasks, CI and review signals for one person.">
+  <Profile client:only="react" />
+</Layout>

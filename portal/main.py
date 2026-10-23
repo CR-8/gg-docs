@@ -693,19 +693,78 @@ def people(days: int = 90):
     return sorted(out, key=lambda p: -p.get("commits", 0))
 
 
+def profile(person):
+    """Who `person` (a GitHub login, or a git email for someone never matched to one) is in this workspace."""
+    m = db.members.find_one({"workspace_id": WORKSPACE.get(), "login_lower": person.lower()}, sort=[("pending", 1)])
+    u = m and m.get("user_id") and db.users.find_one({"_id": m["user_id"]}, {"name": 1, "avatar_url": 1, "github_id": 1})
+    ident = db.identities.one({"$or": [{"login": person}, {"email": person.lower()}]}, fields=["login", "name"])
+    return {"person": person, "member": bool(m), "role": m and m["role"], "joined_at": m and m.get("joined_at"),
+            "user_id": u and u["_id"], "name": (u and u.get("name")) or (ident and ident.get("name")),
+            "avatar_url": u and u.get("avatar_url"),
+            "github": (ident and ident.get("login")) or (None if "@" in person else person)}
+
+
 @app.get("/api/people/{person}")
 def person_detail(person: str, days: int = 90):
+    t = since(days)
     found = db.findings.find({"person": person}, sort=[("id", -1)], limit=200)
     revs = {r["id"]: r for r in db.reviews.find({"id": {"$in": [f["review_id"] for f in found]}},
                                                 fields=["id", "repo", "pr", "branch"])}
+    mine = {"person": person, "committed_at": {"$gte": t}, "is_merge": 0}
+    totals = db.commits.aggregate([{"$match": mine}, {"$group": {
+        "_id": None, "commits": {"$sum": 1}, "adds": {"$sum": "$additions"}, "dels": {"$sum": "$deletions"},
+        "first": {"$min": "$committed_at"}, "last": {"$max": "$committed_at"}}}])
+    who = profile(person)
+    who.pop("user_id")
     return {
-        "commits": db.commits.find({"person": person, "committed_at": {"$gte": since(days)}}, sort=[("committed_at", -1)],
+        "profile": who,
+        "totals": {k: v for k, v in (totals[0] if totals else {}).items() if k != "_id"},
+        # every commit's day, not just the newest 200, for the calendar: the date in the author's own timezone
+        "days": {r["_id"]: r["n"] for r in db.commits.aggregate([
+            {"$match": mine}, {"$group": {"_id": {"$substrCP": ["$committed_at", 0, 10]}, "n": {"$sum": 1}}}])},
+        "repos": db.commits.aggregate([
+            {"$match": mine}, {"$group": {"_id": "$repo", "commits": {"$sum": 1}, "adds": {"$sum": "$additions"},
+                                          "dels": {"$sum": "$deletions"}}},
+            {"$sort": {"commits": -1}}, {"$project": {"_id": 0, "repo": "$_id", "commits": 1, "adds": 1, "dels": 1}}]),
+        "pushes": db.pushes.count({"pusher": person, "pushed_at": {"$gte": t}}),
+        "commits": db.commits.find({"person": person, "committed_at": {"$gte": t}}, sort=[("committed_at", -1)],
                                    limit=200, fields=["repo", "sha", "committed_at", "message", "additions", "deletions",
                                                       "on_default"]),
+        "pulls": db.pulls.find({"author": person}, sort=[("updated_at", -1)], limit=100, fields=[
+            "repo", "number", "title", "state", "draft", "created_at", "updated_at", "merged_at", "url"]),
         "breakages": db.breakages.find({"person": person}, sort=[("broken_at", -1)], limit=100),
         "findings": [{**f, **{k: revs[f["review_id"]][k] for k in ("repo", "pr", "branch")}}
                      for f in found if f["review_id"] in revs],
     }
+
+
+@app.get("/api/people/{person}/tasks")
+def person_tasks(person: str, request: Request):
+    """Their GG-Ops tasks in this workspace's linked workflows, read now as the viewer (their own GG-Ops account when
+    GG-Ops sign-in is set up, else the workspace's key), so nobody sees a task GG-Ops wouldn't show them. A task is
+    theirs when its assignee is the GG-Ops account they connected, else (never connected) one with their name."""
+    who = profile(person)
+    c = who["user_id"] and db.ggops_connections.find_one({"user_id": who["user_id"]}, {"ggops_user_id": 1})
+    ops_id, name = c and c.get("ggops_user_id"), (who["name"] or "").strip().lower()
+    flows = db.workflows.find({"service": "gg-ops"}, sort=[("added_at", 1)])
+    if not flows or not (ops_id or name):
+        return {"tasks": [], "workflows": len(flows), "matched_by": None, "errors": []}
+    viewer = current_user(request)
+    tasks, errors = [], []
+    for w in flows:
+        try:
+            board = (integrations.user_board(viewer["id"], w["workflow_id"]) if integrations.ggops_oauth()
+                     else integrations.check_workflow(w["workflow_id"]))
+        except integrations.ServiceError as e:
+            errors.append(f"{w['name']}: {e}")
+            continue
+        for t in [t for s in board.get("sections") or [] for t in s.get("tasks") or []] + list(board.get("unsectioned") or []):
+            if any(a.get("id") == ops_id if ops_id else (a.get("name") or "").strip().lower() == name
+                   for a in t.get("assignees") or []):
+                tasks.append({**{k: t.get(k) for k in ("id", "title", "status", "priority", "type", "dueDate")},
+                              "blocked": bool(t.get("blockedByCount")), "project": board.get("projectName") or w["name"],
+                              "workflow_id": w["workflow_id"]})
+    return {"tasks": tasks, "workflows": len(flows), "matched_by": "account" if ops_id else "name", "errors": errors}
 
 
 @app.get("/api/breakages")

@@ -336,7 +336,7 @@ Everything the pages show comes from these endpoints (login required):
 |---|---|
 | `GET /api/summary` | CI status of each default-branch head, open breakages, worker queue, whether GitHub and the LLM are configured |
 | `GET /api/activity?repo=&branch=&person=&days=30&limit=100` | Pushes (with their commits, CI checks, breakages, reviews) and commits |
-| `GET /api/people?days=90` · `GET /api/people/{person}?days=90` | The People table · one person's commits, breakages, findings |
+| `GET /api/people?days=90` · `GET /api/people/{person}?days=90` · `GET /api/people/{person}/tasks` | The People table · one person's page: profile, commits per day and per repository, PRs, breakages, findings · their tasks in the linked GG-Ops projects, read with the viewer's GG-Ops access |
 | `GET /api/breakages?days=90` | Breakages in the period plus every open one |
 | `GET /api/reviews` · `GET /api/reviews/{id}` | Reviews with counts · one review with its findings |
 | `GET /api/events` | The last 100 job runs |
@@ -516,7 +516,10 @@ the portal shows none.
 - **Docs**: the generated documentation of every repository (1.5a), with search, history, and .md / .zip / PDF export.
 - **Overview** (`/`): architecture views for each repo (module graph, module tree, call flow, import map, API reference, dependency rules, graph report), every route, live CI status of each default branch, and a Markdown download.
 - **Activity**: a red banner for every CI check currently broken on a default branch (who and since when), then pushes (pusher, branch, force-push flag, commits, CI result on the head, "broke X" badges, review link), then commits. Filter by repo, period and person.
-- **People**: the table from 1.7. Click a column to sort, or a name for that person's commits, breakages and findings.
+- **People**: the table from 1.7. Click a column to sort, or a person for their own page (`/people/person/?p=<login>`):
+  a contribution calendar, commits per repository, their pull requests, CI breakages and review findings, and the
+  tasks assigned to them in the workspace's linked GG-Ops projects (matched by the GG-Ops account they connected, else
+  by name; read with your own GG-Ops access, so you see only tasks GG-Ops shows you).
 - **Reviews**: every review with counts, and each finding with severity, category, file and line (linked to GitHub) and who wrote the line. Admins can **review a PR now** by number.
 - **Ask**: type a question or click an example. Good questions:
   - "Who pushed to v2-accelerated this week, and what did each push change?"

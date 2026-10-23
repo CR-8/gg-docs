@@ -1,85 +1,17 @@
-import { useEffect, useState } from "react"
 import { GitCommitHorizontal, OctagonAlert, Upload, Users } from "lucide-react"
-import { useApi, repoName } from "@/lib/api"
+import { useApi } from "@/lib/api"
 import {
-  Bar, Choice, DataTable, Empty, Failed, KpiStrip, Loading, PageAside, PERIODS, Pr, Section, Severity, Sha, Tag, Time,
-  useQueryState,
+  Bar, Choice, DataTable, Empty, Failed, KpiStrip, Loading, PageAside, PERIODS, personHref, Section, useQueryState,
 } from "@/components/common"
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 
 type Row = Record<string, any> & { person: string }
 
-const fromHash = () => decodeURIComponent(location.hash.slice(1))
-
-function Detail({ person, days }: { person: string; days: string }) {
-  const d = useApi(`/api/people/${encodeURIComponent(person)}?days=${days}`)
-  if (d.error) return <Failed error={d.error} />
-  if (!d.data) return <Loading />
-  const { breakages, findings, commits } = d.data
-  const h = "text-sm font-medium mb-2"
-  return (
-    <div className="space-y-6 px-4 pb-6">
-      <div>
-        <h3 className={h}>Broke CI ({breakages.length})</h3>
-        {breakages.length ? (
-          <ul className="space-y-1.5 text-sm">
-            {breakages.map((b: any) => (
-              <li key={b.id} className="flex flex-wrap items-center gap-1.5">
-                <Tag tone={b.fixed_sha ? "success" : "error"}>{b.fixed_sha ? "fixed" : "open"}</Tag>
-                <b className="font-medium">{b.check_name}</b> at <Sha repo={b.repo} sha={b.broken_sha} />
-                <span className="text-muted-foreground"><Time iso={b.broken_at} /></span>
-              </li>
-            ))}
-          </ul>
-        ) : <p className="text-muted-foreground text-sm">None in this period.</p>}
-      </div>
-      <div>
-        <h3 className={h}>Review findings on their lines ({findings.length})</h3>
-        {findings.length ? (
-          <ul className="space-y-3">
-            {findings.map((f: any) => (
-              <li key={f.id} className="text-sm">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Severity s={f.severity} /> <Tag>{f.category}</Tag>
-                  <a className="link font-medium" href={`/reviews/#r${f.review_id}`}>{f.title}</a>
-                </div>
-                <div className="text-muted-foreground mt-0.5 text-xs">
-                  <code className="font-mono">{f.path}:{f.line}</code> · {repoName(f.repo)} {f.pr ? <Pr repo={f.repo} n={f.pr} /> : f.branch}
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : <p className="text-muted-foreground text-sm">None.</p>}
-      </div>
-      <div>
-        <h3 className={h}>Commits ({commits.length})</h3>
-        <ul className="space-y-1.5 text-sm">
-          {commits.map((c: any) => (
-            <li key={c.sha}>
-              <Sha repo={c.repo} sha={c.sha} /> {c.message}{" "}
-              <span className="text-muted-foreground text-xs">{repoName(c.repo)} +{c.additions} −{c.deletions} · <Time iso={c.committed_at} /></span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  )
-}
+// links from before each person had a page: /people/#login
+if (location.hash.length > 1) location.replace(personHref(decodeURIComponent(location.hash.slice(1))))
 
 export function People() {
   const [days, setDays] = useQueryState("days", "90")
   const rows = useApi<Row[]>(`/api/people?days=${days}`)
-  const [open, setOpen] = useState(fromHash)
-  useEffect(() => {
-    const on = () => setOpen(fromHash())
-    addEventListener("hashchange", on)
-    return () => removeEventListener("hashchange", on)
-  }, [])
-  const close = () => {
-    history.replaceState(null, "", location.pathname + location.search)
-    setOpen("")
-  }
-
   const total = (key: string) => rows.data?.reduce((n, r) => n + (r[key] || 0), 0)
 
   return (
@@ -105,10 +37,10 @@ export function People() {
           <DataTable
             rows={rows.data}
             sort="commits"
-            onRow={(r) => (location.hash = encodeURIComponent(r.person))}
+            onRow={(r) => (location.href = `${personHref(r.person)}&days=${days}`)}
             empty={<Empty title="No one yet">People appear once the first sync has read the git history.</Empty>}
             columns={[
-              { key: "person", label: "Person", render: (r) => <span className="font-medium">{r.person}</span> },
+              { key: "person", label: "Person", render: (r) => <a className="font-medium hover:underline" href={`${personHref(r.person)}&days=${days}`}>{r.person}</a> },
               { key: "commits", label: "Commits", num: true, title: "Non-merge commits on any branch" },
               { key: "adds", label: "+ lines", num: true, title: "Lines added by those commits" },
               { key: "dels", label: "− lines", num: true, wide: true, title: "Lines deleted" },
@@ -123,15 +55,6 @@ export function People() {
           />
         )}
       </Section>
-      <Sheet open={!!open} onOpenChange={(o) => !o && close()}>
-        <SheetContent className="w-full overflow-y-auto data-[side=right]:sm:max-w-xl">
-          <SheetHeader>
-            <SheetTitle>{open}</SheetTitle>
-            <SheetDescription>{PERIODS.find(([d]) => d === days)?.[1]}</SheetDescription>
-          </SheetHeader>
-          {open && <Detail person={open} days={days} />}
-        </SheetContent>
-      </Sheet>
     </div>
   )
 }
