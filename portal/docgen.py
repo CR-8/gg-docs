@@ -21,7 +21,7 @@ import threading
 import traceback
 from collections import Counter, defaultdict
 
-from . import db, llm, repo_dir
+from . import WORKSPACE, db, llm, repo_dir, workspace
 from .sync import default_branch, git, log, now
 
 DOC_VERSION = "1"  # bump when prompts or layout change: every document is rewritten once
@@ -606,7 +606,8 @@ def run(repo, only=None, force=False):
     with_llm = llm.configured()
     if not (only or force) and db.setting(f"docs_done:{repo}") == [head, with_llm, DOC_VERSION]:
         return  # nothing new since the last complete run
-    STATUS[repo] = {"state": "reading the code", "done": 0, "total": 0, "current": None, "head": head}
+    key = WORKSPACE.get(), repo
+    STATUS[key] = {"state": "reading the code", "done": 0, "total": 0, "current": None, "head": head}
     a = analyze(repo)
     docs = plan(a)
     known = {r["slug"]: r["inputs"] for r in db.q("SELECT slug, inputs FROM docs WHERE repo=?", repo)}
@@ -616,10 +617,10 @@ def run(repo, only=None, force=False):
         for slug in set(known) - {d["slug"] for d in docs}:
             db.x("DELETE FROM docs WHERE repo=? AND slug=?", repo, slug)
             db.x("DELETE FROM docs_fts WHERE repo=? AND slug=?", repo, slug)
-    STATUS[repo].update(state="writing", total=len(todo))
+    STATUS[key].update(state="writing", total=len(todo))
     failures = 0
     for d, fp in todo:
-        STATUS[repo]["current"] = d["title"]
+        STATUS[key]["current"] = d["title"]
         try:
             save(repo, d, *render(a, d, head, with_llm), fp, head)
             failures = 0
@@ -629,8 +630,8 @@ def run(repo, only=None, force=False):
             log("docs", f"{repo} {d['slug']}: {e}", False)
             if failures >= 3:  # the model is down: stop, the next sync retries
                 break
-        STATUS[repo]["done"] += 1
-    STATUS.pop(repo, None)
+        STATUS[key]["done"] += 1
+    STATUS.pop(key, None)
     if failures == 0 and not only:
         db.set_setting(f"docs_done:{repo}", [head, with_llm, DOC_VERSION])
     log("docs", f"{repo}: {len(todo)} of {len(docs)} documents updated at {head[:8]}", failures == 0)
@@ -638,15 +639,16 @@ def run(repo, only=None, force=False):
 
 # ---------- its own worker, so long generations never hold up syncs and reviews ----------
 
-jobs, _pending, _lock, STATUS = queue.Queue(), set(), threading.Lock(), {}
+jobs, _pending, _lock, STATUS = queue.Queue(), set(), threading.Lock(), {}  # STATUS: (workspace, repo) -> progress
 
 
 def enqueue(repo, only=None, force=False):
+    job = (WORKSPACE.get(), repo, only, force)
     with _lock:
-        if (repo, only, force) in _pending:
+        if job in _pending:
             return
-        _pending.add((repo, only, force))
-    jobs.put((repo, only, force))
+        _pending.add(job)
+    jobs.put(job)
 
 
 def worker():
@@ -654,12 +656,13 @@ def worker():
         job = jobs.get()
         with _lock:
             _pending.discard(job)
-        try:
-            run(*job)
-        except Exception as e:
-            STATUS.pop(job[0], None)
-            log("docs", f"{job}: {e!r}", False)
-            traceback.print_exc()
+        with workspace(job[0]):
+            try:
+                run(*job[1:])
+            except Exception as e:
+                STATUS.pop(job[:2], None)
+                log("docs", f"{job[1:]}: {e!r}", False)
+                traceback.print_exc()
 
 
 def start():
@@ -667,9 +670,15 @@ def start():
 
 
 def status(repo):
+    key = WORKSPACE.get(), repo
     with _lock:
-        queued = sum(1 for j in _pending if j[0] == repo)
-    return {**STATUS.get(repo, {"state": "idle"}), "queued": queued}
+        queued = sum(1 for j in _pending if j[:2] == key)
+    return {**STATUS.get(key, {"state": "idle"}), "queued": queued}
+
+
+def writing():
+    """Whether the current workspace's documentation is being written right now."""
+    return any(k[0] == WORKSPACE.get() for k in list(STATUS))
 
 
 

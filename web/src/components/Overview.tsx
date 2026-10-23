@@ -141,7 +141,29 @@ export function Overview() {
   }, [])
   const s = summary.data
 
-  if (data === undefined) return <Loading rows={6} />
+  if (data === undefined || !s) return <Loading rows={6} />
+  if (!data && !s.views)
+    return (
+      <Section title={s.repos.length ? "Your repositories" : "Import your first repository"}>
+        {s.repos.length ? (
+          <div className="divide-y rounded-lg border">
+            {(s.repos as string[]).map((r) => (
+              <div key={r} className="flex items-center gap-3 px-3 py-2 text-sm">
+                <span className="font-mono text-xs">{r}</span>
+                <a className="link ml-auto text-xs" href={`/docs/#${r.split("/")[1]}/overview`}>docs</a>
+                <a className="link text-xs" href={`/activity/?repo=${encodeURIComponent(r)}`}>activity</a>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-muted-foreground max-w-2xl text-sm text-pretty">
+            Paste a GitHub URL or pick one of your repositories. It is cloned into this workspace, then every push and
+            pull request is synced, reviewed and documented.
+          </p>
+        )}
+        <Button size="sm" className="mt-4" asChild><a href="/new/">Import a repository</a></Button>
+      </Section>
+    )
   if (!data)
     return (
       <Section title="Getting things ready">

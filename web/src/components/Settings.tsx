@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { Check, Copy as CopyIcon, Cpu, GitBranch, Hammer, Plug, Plus, RefreshCw, X } from "lucide-react"
-import { bytes, post, useApi, useMe } from "@/lib/api"
+import { Check, Copy as CopyIcon, Cpu, GitBranch, Hammer, Mail, Plug, Plus, RefreshCw, Users, X } from "lucide-react"
+import { bytes, post, useApi, useMe, type Role } from "@/lib/api"
 import { Choice, DataTable, Loading, Section, Tag, Time } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -79,7 +79,7 @@ function StatusPanel({ admin }: { admin: boolean }) {
       {admin && (
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => act("sync")}><RefreshCw /> Sync now</Button>
-          <Button variant="outline" size="sm" onClick={() => act("rebuild")}><Hammer /> Rebuild views</Button>
+          {d?.views && <Button variant="outline" size="sm" onClick={() => act("rebuild")}><Hammer /> Rebuild views</Button>}
           <Note>{msg}</Note>
         </div>
       )}
@@ -113,26 +113,21 @@ const Snippet = ({ label, text }: { label: ReactNode; text: string }) => (
 const MCP_TOOLS = ["pull_requests", "pull_request", "recent_pushes", "docs", "sql", "commit_diff", "code_graph", "architecture", "sonar_issues"]
 
 function Mcp({ admin }: { admin: boolean }) {
-  const m = useApi<{ url: string; token_url: string | null; token: string | null }>(admin ? "/api/settings/mcp" : null)
+  const m = useApi<{ url: string; token_url: string; token: string }>(admin ? "/api/settings/mcp" : null)
   return (
     <Section
       title={<span className="flex items-center gap-2"><Plug className="size-4" /> Connect a coding agent (MCP)</span>}
-      description="Give Claude Code, Codex, ChatGPT, Mistral, Cursor or any MCP client live, read-only access to PRs, pushes, CI, reviews, docs and the code graph."
+      description="Give Claude Code, Codex, ChatGPT, Mistral, Cursor or any MCP client live, read-only access to this workspace's PRs, pushes, CI, reviews, docs and code graph."
     >
       {!admin ? (
-        <Note>An admin can copy the connection details from this page.</Note>
-      ) : !m.data ? <Loading rows={3} /> : !m.data.token ? (
-        <Note>
-          The MCP server is off. Re-run <code className="font-mono text-xs">install.sh</code> (it creates <code className="font-mono text-xs">MCP_TOKEN</code>), or set{" "}
-          <code className="font-mono text-xs">MCP_TOKEN</code> in .env and restart the portal.
-        </Note>
-      ) : (
+        <Note>An owner or admin can copy the connection details from this page.</Note>
+      ) : !m.data ? <Loading rows={3} /> : (
         <div className="space-y-4">
           <Snippet label="Claude Code" text={`claude mcp add --transport http genegenius ${m.data.url} --header "Authorization: Bearer ${m.data.token}"`} />
           <Snippet label="Codex CLI" text={`codex mcp add genegenius --url ${m.data.token_url}`} />
           <Snippet
             label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
-            text={m.data.token_url!}
+            text={m.data.token_url}
           />
           <div className="flex flex-wrap gap-1">{MCP_TOOLS.map((t) => <Tag key={t}>{t}</Tag>)}</div>
         </div>
@@ -143,43 +138,157 @@ function Mcp({ admin }: { admin: boolean }) {
 
 function Repositories({ admin }: { admin: boolean }) {
   const s = useApi("/api/summary")
-  const [repo, setRepo] = useState("")
   const [msg, setMsg] = useState("")
-  const act = async (action: string, r: string) => {
+  const remove = async (r: string) => {
+    if (!confirm(`Stop syncing ${r}? Its history stays; importing it again picks it back up.`)) return
     try {
-      await post(`/api/admin/${action}`, { repo: r })
-      setMsg(action === "add_repo" ? `Added. ${r} is being cloned; its documentation follows.` : `Removed ${r}.`)
-      setRepo("")
+      await post("/api/admin/remove_repo", { repo: r })
+      setMsg(`Removed ${r}.`)
       s.reload()
     } catch (e: any) {
       setMsg(e.message)
     }
   }
-  const extra: string[] = s.data?.extra_repos ?? []
   return (
     <Section title={<span className="flex items-center gap-2"><GitBranch className="size-4" /> Repositories</span>}
-      description="Every repository here is synced, reviewed and documented. The first two also get the architecture views and SonarQube.">
+      description="Every repository here is synced (webhooks, plus a poll every few minutes), reviewed and documented."
+      action={admin && <Button size="sm" variant="outline" asChild><a href="/new/"><Plus /> Import</a></Button>}>
       {!s.data ? <Loading rows={2} /> : (
         <div className="space-y-3">
+          {s.data.repos.length ? (
+            <div className="divide-y rounded-lg border">
+              {(s.data.repos as string[]).map((r) => (
+                <div key={r} className="flex items-center gap-2 px-3 py-2 text-sm">
+                  <span className="font-mono text-xs">{r}</span>
+                  <a className="link ml-auto text-xs" href={`/docs/#${r.split("/")[1]}/overview`}>docs</a>
+                  {admin && (
+                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Remove ${r}`} onClick={() => remove(r)}><X /></Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : <Note>None yet. {admin ? <a className="link" href="/new/">Import the first one.</a> : "An owner or admin imports them."}</Note>}
+          {msg && <Note>{msg}</Note>}
+        </div>
+      )}
+    </Section>
+  )
+}
+
+const ROLE_HINT: Record<Role, string> = {
+  owner: "Everything, including owners",
+  admin: "Members, repositories and settings",
+  member: "Sees everything, changes nothing",
+}
+
+type Team = {
+  members: { login: string; role: Role; name: string | null; avatar_url: string | null; joined_at: string }[]
+  invites: { id: number; email: string; role: Role; invited_by: string; created_at: string }[]
+  email: boolean
+}
+
+/** Who is in this workspace, and email invites for whoever should be. */
+function TeamPanel({ me }: { me: NonNullable<ReturnType<typeof useMe>> }) {
+  const t = useApi<Team>("/api/workspace/members")
+  const [email, setEmail] = useState("")
+  const [role, setRole] = useState<Role>("member")
+  const [sent, setSent] = useState<{ link: string; text: string; ok: boolean } | null>(null)
+  const [msg, setMsg] = useState("")
+  const [name, setName] = useState(me.workspace?.name ?? "")
+  const owner = me.role === "owner"
+  const act = async (fn: () => Promise<unknown>) => {
+    setMsg("")
+    try {
+      await fn()
+      t.reload()
+    } catch (e: any) {
+      setMsg(e.message)
+    }
+  }
+  const invite = (e: React.FormEvent) => {
+    e.preventDefault()
+    act(async () => {
+      const r = await post<{ link: string; emailed: boolean; error: string | null }>("/api/workspace/invites", { email, role })
+      setSent({ link: r.link, ok: r.emailed, text: r.emailed ? `Invite emailed to ${email}.` : r.error || `Send ${email} this link.` })
+      setEmail("")
+    })
+  }
+  const leave = () => {
+    if (confirm(`Leave ${me.workspace?.name}?`)) act(() => post(`/api/workspace/members/${me.login}`, undefined, "DELETE").then(() => (location.href = "/")))
+  }
+
+  return (
+    <Section
+      title={<span className="flex items-center gap-2"><Users className="size-4" /> Team</span>}
+      description={`People in ${me.workspace?.name}. An invite is a link that works once, for 7 days.`}
+    >
+      {!t.data ? <Loading rows={3} /> : (
+        <div className="space-y-4">
+          {me.admin && (
+            <form className="flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); act(() => post("/api/workspace", { name }, "PUT").then(() => location.reload())) }}>
+              <Input value={name} onChange={(e) => setName(e.target.value)} aria-label="Workspace name" maxLength={80} className="h-8 w-64" required />
+              <Button size="sm" variant="outline" type="submit" disabled={name.trim() === me.workspace?.name}>Rename</Button>
+            </form>
+          )}
           <div className="divide-y rounded-lg border">
-            {(s.data.repos as string[]).map((r) => (
-              <div key={r} className="flex items-center gap-2 px-3 py-2 text-sm">
-                <span className="font-mono text-xs">{r}</span>
-                <Tag className="ml-1">{extra.includes(r) ? "added" : "built in"}</Tag>
-                <a className="link ml-auto text-xs" href={`/docs/#${r.split("/")[1]}/overview`}>docs</a>
-                {admin && extra.includes(r) && (
-                  <Button type="button" variant="ghost" size="icon-xs" aria-label={`Remove ${r}`} onClick={() => act("remove_repo", r)}><X /></Button>
+            {t.data.members.map((m) => (
+              <div key={m.login} className="flex items-center gap-2 px-3 py-2 text-sm">
+                {m.avatar_url ? <img src={m.avatar_url} alt="" className="size-6 rounded-full" /> : (
+                  <span className="bg-muted grid size-6 place-items-center rounded-full text-xs font-semibold uppercase">{m.login[0]}</span>
                 )}
+                <span className="truncate font-medium">{m.login}</span>
+                {m.name && <span className="text-muted-foreground hidden truncate text-xs sm:inline">{m.name}</span>}
+                <span className="ml-auto flex items-center gap-1">
+                  {me.admin && (owner || m.role !== "owner") ? (
+                    <Choice label={`Role of ${m.login}`} value={m.role} className="w-28"
+                      onChange={(v) => act(() => post(`/api/workspace/members/${m.login}`, { role: v }, "PUT"))}
+                      options={(owner ? ["owner", "admin", "member"] : ["admin", "member"]).map((r) => [r, r])} />
+                  ) : <Tag>{m.role}</Tag>}
+                  {m.login.toLowerCase() === me.login.toLowerCase() ? (
+                    <Button type="button" variant="ghost" size="sm" onClick={leave}>Leave</Button>
+                  ) : me.admin && (owner || m.role !== "owner") && (
+                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Remove ${m.login}`}
+                      onClick={() => confirm(`Remove ${m.login} from ${me.workspace?.name}?`) && act(() => post(`/api/workspace/members/${m.login}`, undefined, "DELETE"))}><X /></Button>
+                  )}
+                </span>
               </div>
             ))}
           </div>
-          {admin && (
-            <form className="flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); act("add_repo", repo.trim()) }}>
-              <Input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="owner/repository" className="h-8 w-64 font-mono text-xs" pattern="[\w.\-]+/[\w.\-]+" required />
-              <Button size="sm" type="submit" variant="outline"><Plus /> Add</Button>
-              <Note>{msg || "The GitHub token or App must be able to read it."}</Note>
-            </form>
+
+          {me.admin && (
+            <>
+              <form className="flex flex-wrap items-center gap-2" onSubmit={invite}>
+                <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="teammate@company.com" aria-label="Email to invite" className="h-8 min-w-0 flex-1" required />
+                <Choice label="Role" value={role} onChange={(v) => setRole(v as Role)} className="w-28"
+                  options={(owner ? ["member", "admin", "owner"] : ["member", "admin"]).map((r) => [r, r])} />
+                <Button size="sm" type="submit"><Mail /> Invite</Button>
+              </form>
+              <p className="text-muted-foreground text-xs">{ROLE_HINT[role]}. {t.data.email ? "They get an email with the link." : "Email isn't set up on this server (SMTP_HOST), so you send the link yourself."}</p>
+              {sent && (
+                <div className="space-y-2">
+                  <Note>{sent.text}</Note>
+                  <Snippet label="Invite link (works once)" text={sent.link} />
+                </div>
+              )}
+              {!!t.data.invites.length && (
+                <div>
+                  <div className="text-muted-foreground mb-1 text-xs">Waiting for an answer</div>
+                  <div className="divide-y rounded-lg border">
+                    {t.data.invites.map((i) => (
+                      <div key={i.id} className="flex items-center gap-2 px-3 py-2 text-sm">
+                        <span className="truncate">{i.email}</span>
+                        <Tag>{i.role}</Tag>
+                        <span className="text-muted-foreground hidden text-xs sm:inline">by {i.invited_by}, <Time iso={i.created_at} /></span>
+                        <Button type="button" variant="ghost" size="sm" className="ml-auto"
+                          onClick={() => act(() => post(`/api/workspace/invites/${i.id}`, undefined, "DELETE"))}>Revoke</Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
+          {msg && <p className="text-destructive text-sm">{msg}</p>}
         </div>
       )}
     </Section>
@@ -295,7 +404,7 @@ export function Settings() {
           <fieldset disabled={!admin} className="space-y-6">
             <Section
               title="Language model"
-              description={admin ? "Writes the code reviews and answers questions in Ask." : "Only admins can change these. Sign in with the admin password to edit."}
+              description={admin ? "Writes the code reviews and answers questions in Ask, for this workspace." : "Only the workspace's owners and admins can change these."}
             >
               {!ready ? <Loading rows={3} /> : (
                 <Tabs value={provider} onValueChange={(v) => setProvider(v as Provider)}>
@@ -398,9 +507,10 @@ export function Settings() {
         <StatusPanel admin={admin} />
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
+        {me && <TeamPanel me={me} />}
         <Repositories admin={admin} />
-        <Mcp admin={admin} />
       </div>
+      <Mcp admin={admin} />
       <Jobs />
     </div>
   )

@@ -11,17 +11,17 @@ from pathlib import Path
 
 import httpx
 
-from . import BACKEND_REPO, FRONTEND_REPO, REPOS, SITE, SONAR_KEYS, SONAR_URL, WORK, db, docgen, llm, repo_dir
+from . import SONAR_URL, WORKSPACE, db, docgen, llm, repo_dir, site_dir, work_dir
 from .github import gh
-from .sync import sonar_token
+from .sync import sonar_keys, sonar_token, views
 
 MAX_ROUNDS = 10
 MAX_OUT = int(os.environ.get("CHAT_TOOL_CHARS") or 20000)  # per tool result; smaller for a local model's context
 CHAT_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT") or 300)  # seconds for a whole answer (install.sh: more for CPU)
 
-SYSTEM = """You are the GeneGenius engineering portal assistant. You answer questions about two repositories:
-the backend {backend} (FastAPI) and the frontend {frontend} (Next.js): who pushed what, whose push broke CI,
-code review findings, code quality per person, architecture, routes and modules.
+SYSTEM = """You are the engineering portal assistant of the {workspace} workspace. You answer questions about its
+repositories ({repos}): who pushed what, whose push broke CI, code review findings, code quality per person,
+architecture, routes and modules. {views}
 
 Always use the tools to look things up; never guess numbers, names or dates. Cite short commit SHAs, PR numbers
 and dates. When you rank people, say exactly what the number counts and over which period, and mention that
@@ -32,7 +32,7 @@ How the data is collected:
 - commits: git history of all branches for the last 90 days; person = GitHub login when known, else the author email;
   is_merge = 1 for merge commits; on_default = 1 when the commit is on the repo's default branch.
 - pushes / push_commits: who pushed which commits to which branch (GitHub webhooks and the Events API).
-- checks: CI check-run results per commit (the team's 5 levels of test pipelines).
+- checks: CI check-run results per commit.
 - breakages: a CI check that passed on the previous default-branch commit and failed on broken_sha; person is
   that commit's author, pusher who pushed it; fixed_sha is the first later commit where it passed again.
 - reviews / findings: the review bot's results per PR (pr > 0) or direct push (pr = 0, branch set); each finding
@@ -46,47 +46,51 @@ Today is {today}.
 SQLite schema:
 {schema}"""
 
-TOOLS = [
-    {"name": "sql", "description": "Run one read-only SQLite SELECT (or WITH ... SELECT) on the portal database. "
-     "Returns up to 200 rows as JSON.",
-     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
-    {"name": "commit_diff", "description": "Show a commit: message, author, changed files and, when path is given, "
-     "that file's patch.",
-     "parameters": {"type": "object", "properties": {
-         "repo": {"type": "string", "enum": REPOS}, "sha": {"type": "string"},
-         "path": {"type": "string", "description": "optional file path"}}, "required": ["repo", "sha"]}},
-    {"name": "code_graph", "description": "Search the code knowledge graph (functions, classes, imports, calls) of "
-     "the backend or frontend for a question, e.g. 'what calls the report generator'.",
-     "parameters": {"type": "object", "properties": {
-         "side": {"type": "string", "enum": ["backend", "frontend"]}, "question": {"type": "string"}},
-         "required": ["side", "question"]}},
-    {"name": "architecture", "description": "Read ARCHITECTURE.md: modules and their files, import maps, every "
-     "route. Without section, returns the list of headings.",
-     "parameters": {"type": "object", "properties": {"section": {"type": "string"}}}},
-    {"name": "sonar_issues", "description": "List open SonarQube issues for a repo, optionally for one author email.",
-     "parameters": {"type": "object", "properties": {
-         "repo": {"type": "string", "enum": REPOS}, "author_email": {"type": "string"},
-         "quality": {"type": "string", "enum": ["RELIABILITY", "SECURITY", "MAINTAINABILITY"]}}, "required": ["repo"]}},
-    {"name": "pull_requests", "description": "List pull requests, most recently updated first: title, author, state, "
-     "branches, head SHA, and how many review-bot findings the current head has.",
-     "parameters": {"type": "object", "properties": {
-         "repo": {"type": "string", "enum": REPOS}, "limit": {"type": "integer", "description": "default 30"},
-         "state": {"type": "string", "enum": ["open", "closed", "merged", "all"], "description": "default open"}}}},
-    {"name": "pull_request", "description": "One pull request: its details, the files it changes, every review of it "
-     "and the latest review's findings (with who wrote each flagged line).",
-     "parameters": {"type": "object", "properties": {
-         "repo": {"type": "string", "enum": REPOS}, "number": {"type": "integer"}}, "required": ["repo", "number"]}},
-    {"name": "recent_pushes", "description": "Pushes of the last few days: who pushed which commits to which branch, "
-     "CI results on each pushed head, and every CI check currently broken on a default branch.",
-     "parameters": {"type": "object", "properties": {
-         "days": {"type": "integer", "description": "default 7, at most 90"}, "repo": {"type": "string", "enum": REPOS}}}},
-    {"name": "docs", "description": "The documentation the portal writes and keeps current for each repository "
-     "(overview, architecture, data flow, system design, ML system, API, one per component, with diagrams). "
-     "No arguments: list every document. repo + slug: read one. query: full-text search across all of them.",
-     "parameters": {"type": "object", "properties": {
-         "repo": {"type": "string", "enum": REPOS}, "slug": {"type": "string", "description": "e.g. architecture, "
-         "data-flow, modules/services-annotation"}, "query": {"type": "string"}}}},
-]
+
+def tools():
+    """The tool definitions, with this workspace's repositories as the allowed values."""
+    repos = db.repos()
+    return [
+        {"name": "sql", "description": "Run one read-only SQLite SELECT (or WITH ... SELECT) on the portal database. "
+         "Returns up to 200 rows as JSON.",
+         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+        {"name": "commit_diff", "description": "Show a commit: message, author, changed files and, when path is given, "
+         "that file's patch.",
+         "parameters": {"type": "object", "properties": {
+             "repo": {"type": "string", "enum": repos}, "sha": {"type": "string"},
+             "path": {"type": "string", "description": "optional file path"}}, "required": ["repo", "sha"]}},
+        {"name": "code_graph", "description": "Search the code knowledge graph (functions, classes, imports, calls) of "
+         "the backend or frontend for a question, e.g. 'what calls the report generator'.",
+         "parameters": {"type": "object", "properties": {
+             "side": {"type": "string", "enum": ["backend", "frontend"]}, "question": {"type": "string"}},
+             "required": ["side", "question"]}},
+        {"name": "architecture", "description": "Read ARCHITECTURE.md: modules and their files, import maps, every "
+         "route. Without section, returns the list of headings.",
+         "parameters": {"type": "object", "properties": {"section": {"type": "string"}}}},
+        {"name": "sonar_issues", "description": "List open SonarQube issues for a repo, optionally for one author email.",
+         "parameters": {"type": "object", "properties": {
+             "repo": {"type": "string", "enum": repos}, "author_email": {"type": "string"},
+             "quality": {"type": "string", "enum": ["RELIABILITY", "SECURITY", "MAINTAINABILITY"]}}, "required": ["repo"]}},
+        {"name": "pull_requests", "description": "List pull requests, most recently updated first: title, author, state, "
+         "branches, head SHA, and how many review-bot findings the current head has.",
+         "parameters": {"type": "object", "properties": {
+             "repo": {"type": "string", "enum": repos}, "limit": {"type": "integer", "description": "default 30"},
+             "state": {"type": "string", "enum": ["open", "closed", "merged", "all"], "description": "default open"}}}},
+        {"name": "pull_request", "description": "One pull request: its details, the files it changes, every review of it "
+         "and the latest review's findings (with who wrote each flagged line).",
+         "parameters": {"type": "object", "properties": {
+             "repo": {"type": "string", "enum": repos}, "number": {"type": "integer"}}, "required": ["repo", "number"]}},
+        {"name": "recent_pushes", "description": "Pushes of the last few days: who pushed which commits to which branch, "
+         "CI results on each pushed head, and every CI check currently broken on a default branch.",
+         "parameters": {"type": "object", "properties": {
+             "days": {"type": "integer", "description": "default 7, at most 90"}, "repo": {"type": "string", "enum": repos}}}},
+        {"name": "docs", "description": "The documentation the portal writes and keeps current for each repository "
+         "(overview, architecture, data flow, system design, ML system, API, one per component, with diagrams). "
+         "No arguments: list every document. repo + slug: read one. query: full-text search across all of them.",
+         "parameters": {"type": "object", "properties": {
+             "repo": {"type": "string", "enum": repos}, "slug": {"type": "string", "description": "e.g. architecture, "
+             "data-flow, modules/services-annotation"}, "query": {"type": "string"}}}},
+    ]
 
 
 def clip(text, limit=MAX_OUT):
@@ -112,7 +116,7 @@ def tool_sql(query):
 
 
 def tool_commit_diff(repo, sha, path=""):
-    if repo not in REPOS or not re.fullmatch(r"[0-9a-fA-F]{4,40}", sha or ""):
+    if repo not in db.repos() or not re.fullmatch(r"[0-9a-fA-F]{4,40}", sha or ""):
         return "Unknown repo or invalid sha."
     args = ["git", "show", "--no-color", "--format=fuller", sha] + (["--", path] if path else ["--stat"])
     r = subprocess.run(args, cwd=repo_dir(repo), capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -120,7 +124,7 @@ def tool_commit_diff(repo, sha, path=""):
 
 
 def tool_code_graph(side, question):
-    graph = WORK / side / "graphify-out" / "graph.json"
+    graph = work_dir() / side / "graphify-out" / "graph.json"
     if not graph.exists():
         return "The code graph has not been built yet."
     beside = Path(sys.executable).with_name("graphify.exe" if os.name == "nt" else "graphify")
@@ -132,7 +136,7 @@ def tool_code_graph(side, question):
 
 
 def tool_architecture(section=""):
-    doc = SITE / "ARCHITECTURE.md"
+    doc = site_dir() / "ARCHITECTURE.md"
     if not doc.exists():
         return "ARCHITECTURE.md has not been generated yet."
     lines = doc.read_text(encoding="utf-8").splitlines()
@@ -148,9 +152,10 @@ def tool_architecture(section=""):
 
 def tool_sonar_issues(repo, author_email="", quality=""):
     token = sonar_token()
-    if not token or repo not in SONAR_KEYS:
+    keys = sonar_keys()
+    if not token or repo not in keys:
         return "SonarQube is not configured."
-    params = {"components": SONAR_KEYS[repo], "issueStatuses": "OPEN,CONFIRMED", "ps": 100}
+    params = {"components": keys[repo], "issueStatuses": "OPEN,CONFIRMED", "ps": 100}
     if author_email:
         params["author"] = author_email
     if quality:
@@ -186,7 +191,7 @@ def tool_pull_request(repo, number):
     findings = db.q("SELECT path, line, severity, category, title, body, person FROM findings WHERE review_id=?",
                     reviews[-1]["id"]) if reviews else []
     files = []
-    if gh.enabled and repo in REPOS:  # what the PR touches, live from GitHub
+    if gh.enabled and repo in db.repos():  # what the PR touches, live from GitHub
         try:
             files = [{k: f[k] for k in ("filename", "status", "additions", "deletions")}
                      for f in gh.paginate(f"/repos/{repo}/pulls/{int(number)}/files", limit=300)]
@@ -235,12 +240,22 @@ def run_tool(name, args, limit=MAX_OUT):
         return f"{name} failed: {e}"
 
 
+def system():
+    name = db.cq("SELECT name FROM workspaces WHERE id=?", WORKSPACE.get())[0]["name"]
+    pair = views()
+    return SYSTEM.format(
+        workspace=name, repos=", ".join(db.repos()) or "none imported yet", today=date.today().isoformat(),
+        schema=db.schema_text(),
+        views=(f"The code_graph and architecture tools cover the backend {pair[0]} (FastAPI) and the frontend "
+               f"{pair[1]} (Next.js)." if pair else "This workspace has no architecture views, so code_graph and "
+               "architecture have nothing yet; use docs for how the code is organised."))
+
+
 def answer(history, question):
     """history: earlier [{role: user|assistant, content: text}] from the browser (text only, so no stale
     thinking blocks are ever replayed). Returns the answer plus the tool calls made, for the UI."""
     deadline = time.monotonic() + CHAT_TIMEOUT
-    conv = llm.Conversation(SYSTEM.format(backend=BACKEND_REPO, frontend=FRONTEND_REPO, today=date.today().isoformat(),
-                                          schema=db.schema_text()), timeout=CHAT_TIMEOUT, retries=1)
+    conv = llm.Conversation(system(), timeout=CHAT_TIMEOUT, retries=1)
     for m in history[-20:]:
         if m.get("role") == "user":
             conv.add_user(str(m.get("content", ""))[:8000])
@@ -254,7 +269,7 @@ def answer(history, question):
                 return {"answer": f"I ran out of time ({int(CHAT_TIMEOUT)} s) after {len(steps)} lookups. A local CPU "
                                   "model is slow with questions that need many lookups: try a narrower question, or "
                                   "a hosted model in Settings.", "steps": steps}
-            reply = conv.step(TOOLS)
+            reply = conv.step(tools())
             if not reply.tool_calls:
                 return {"answer": reply.text, "steps": steps}
             results = []

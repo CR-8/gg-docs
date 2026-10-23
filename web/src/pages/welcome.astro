@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Welcome } from "@/components/Welcome"
+---
+
+<Layout title="Welcome" bare>
+  <Welcome client:only="react" />
+</Layout>

@@ -3,16 +3,40 @@ import hashlib
 import hmac
 import os
 import tempfile
+from urllib.parse import parse_qs, urlsplit
 
 os.environ["DATA_DIR"] = tempfile.mkdtemp()  # before importing portal, so the DB lands in a scratch dir
-os.environ.update(PORTAL_PASSWORD="viewer-pw", ADMIN_PASSWORD="admin-pw", DISABLE_WORKER="1", MCP_TOKEN="mcp-secret")
+os.environ.update(DISABLE_WORKER="1", GITHUB_CLIENT_ID="cid", GITHUB_CLIENT_SECRET="csecret")
 
-from portal import db  # noqa: E402
+from portal import WORKSPACE, db  # noqa: E402
 from portal.chat import tool_sql  # noqa: E402
 from portal.github import verify_signature  # noqa: E402
 from portal.llm import anthropic_tools, openai_tools, parse_args  # noqa: E402
 from portal.review import annotate, clean, make_chunks, parse_json, split_diff  # noqa: E402
 from portal.sync import detect_breakages, person_for  # noqa: E402
+
+db.init()
+WS = db.create_workspace("Acme", "alice")
+WORKSPACE.set(WS)  # the tests below run inside Acme, like a request or a job would
+
+
+def sign_in(client, login, next="/"):
+    """The GitHub sign-in round trip, with GitHub itself stubbed out. Returns where it lands."""
+    from portal.github import gh
+    to_github = client.get("/auth/github", params={"next": next}, follow_redirects=False).headers["location"]
+    state = parse_qs(urlsplit(to_github).query)["state"][0]
+    saved = gh.oauth_login
+    gh.oauth_login = lambda code, uri: {"login": login, "name": login.title(), "avatar_url": None,
+                                        "token": f"t-{login}", "refresh_token": None, "token_expires": None}
+    try:
+        return client.get(f"/auth/callback?code=x&state={state}", follow_redirects=False).headers["location"]
+    finally:
+        gh.oauth_login = saved
+
+
+def mcp_token(ws):
+    return db.cq("SELECT mcp_token FROM workspaces WHERE id=?", ws)[0]["mcp_token"]
+
 
 DIFF = """diff --git a/app/x.py b/app/x.py
 index 1..2 100644
@@ -109,52 +133,182 @@ def test_people_and_readonly_sql():
     assert db.q("SELECT COUNT(*) n FROM identities")[0]["n"] == 1
 
 
-def test_password_login_without_github():
+def test_repository_urls():
+    from portal.main import parse_repo
+    for text in ("https://github.com/acme/app", "https://github.com/acme/app.git", "github.com/acme/app/tree/main/src",
+                 "git@github.com:acme/app.git", "acme/app", " https://www.github.com/acme/app/ ",
+                 "http://github.com/acme/app?tab=readme-ov-file"):
+        assert parse_repo(text) == "acme/app", text
+    assert parse_repo("acme/my.lib.git") == "acme/my.lib"
+    for text in ("https://gitlab.com/acme/app", "gitlab.com/acme/app", "ftp://github.com/acme/app", "acme", "../etc",
+                 "acme/..", "acme/.", "", "a b/c"):
+        assert parse_repo(text) is None, text
+
+
+def test_workspaces_invites_roles_and_isolation(monkeypatch):
     from fastapi.testclient import TestClient
+    from portal import mail
     from portal.main import app
-    with TestClient(app) as viewer, TestClient(app) as admin:
-        assert viewer.get("/api/summary").status_code == 401
-        assert viewer.get("/people/", follow_redirects=False).headers["location"].startswith("/auth/login?next=")
-        assert viewer.get("/auth/login", follow_redirects=False).headers["location"] == "/login/?next=/"
-        assert viewer.get("/auth/methods").json() == {"github": False, "password": True, "org": "GeneGeniusinc"}
-        r = viewer.post("/auth/password", data={"password": "nope", "next": "/x"}, follow_redirects=False)
-        assert r.headers["location"] == "/login/?next=/x&error=Wrong%20password."
-        r = viewer.post("/auth/password", data={"password": "viewer-pw", "next": "/activity"}, follow_redirects=False)
-        assert r.status_code == 303 and r.headers["location"] == "/activity"
-        assert viewer.get("/api/me").json() == {"login": "team", "admin": False}
-        assert viewer.get("/api/summary").json()["github"] is None
-        assert viewer.put("/api/settings", json={"llm_kind": "openai"}).status_code == 403
-        r = admin.post("/auth/password", data={"password": "admin-pw", "next": "/\\evil.example"}, follow_redirects=False)
-        assert r.headers["location"] == "/"  # browsers read /\host as //host
-        assert admin.get("/api/me").json() == {"login": "admin", "admin": True}
-        assert admin.put("/api/settings", json={"llm_kind": "openai"}).status_code == 200
-        assert viewer.post("/api/admin/add_repo", json={"repo": "acme/extra"}).status_code == 403
-        assert admin.post("/api/admin/add_repo", json={"repo": "acme/extra"}).status_code == 200
-        assert "acme/extra" in admin.get("/api/summary").json()["repos"]
-        assert admin.post("/api/admin/add_repo", json={"repo": "other/extra"}).status_code == 400  # same clone folder
-        for bad in ("../etc", "acme/..", "acme/.", "a/b/c", "acme"):
-            assert admin.post("/api/admin/add_repo", json={"repo": bad}).status_code == 400, bad
-        admin.post("/api/admin/remove_repo", json={"repo": "acme/extra"})
-        assert "acme/extra" not in admin.get("/api/summary").json()["repos"]
+    sent = []
+    monkeypatch.setattr(mail, "send_invite", lambda to, ws, who, link, days: sent.append((to, ws, who, link)) or True)
+    db.x("INSERT OR IGNORE INTO commits(repo, sha, person, committed_at, additions, is_merge) "
+         "VALUES('acme/app', 'c0ffee', 'alice', '2099-01-01', 5, 0)")
+    with TestClient(app) as alice, TestClient(app) as bob, TestClient(app) as eve:
+        assert alice.get("/api/summary").status_code == 401
+        assert alice.get("/people/", follow_redirects=False).headers["location"].startswith("/auth/login?next=")
+        assert alice.get("/auth/login", follow_redirects=False).headers["location"] == "/login/?next=/"
+        forged = alice.get("/auth/callback?code=x&state=forged", follow_redirects=False).headers["location"]
+        assert forged.startswith("/login/?next=/&error=")
+        assert sign_in(alice, "alice", next="/\\evil.example") == "/"  # browsers read /\host as //host
+        assert alice.get("/api/me").json()["workspace"] == {"id": WS, "name": "Acme"}
+
+        sign_in(bob, "bob")  # anyone can sign in; with no workspace they land on the welcome page
+        assert bob.get("/api/me").json()["workspace"] is None
+        assert bob.get("/api/summary").status_code == 409
+        assert bob.get("/", follow_redirects=False).headers["location"] == "/welcome/"
+
+        r = alice.post("/api/workspace/invites", json={"email": " Bob@X.com ", "role": "member"}).json()
+        assert r["emailed"] and sent == [("bob@x.com", "Acme", "alice", r["link"])]
+        assert alice.post("/api/workspace/invites", json={"email": "not-an-email"}).status_code == 400
+        assert alice.post("/api/workspace/invites", json={"email": "a@b.co", "role": "god"}).status_code == 400
+        assert [i["email"] for i in alice.get("/api/workspace/members").json()["invites"]] == ["bob@x.com"]
+        link = urlsplit(r["link"]).path
+        token = link.removeprefix("/invite/")
+        assert eve.get(link, follow_redirects=False).headers["location"].startswith("/login/?next=/invite/")
+        # Opening the link only asks; joining takes a POST, so no other site can sign someone into a workspace.
+        assert bob.get(link, follow_redirects=False).headers["location"] == f"/welcome/?invite={token}"
+        assert bob.get("/api/me").json()["workspace"] is None
+        assert bob.get(f"/api/invites/{token}").json() == {"workspace": "Acme", "role": "member", "invited_by": "alice"}
+        assert bob.post(f"/api/invites/{token}/accept").json() == {"id": WS}
+        me = bob.get("/api/me").json()
+        assert me["workspace"]["name"] == "Acme" and me["role"] == "member" and not me["admin"]
+        sign_in(eve, "eve")
+        assert eve.get(f"/api/invites/{token}").status_code == 404  # works once
+        assert eve.post(f"/api/invites/{token}/accept").status_code == 404
+        assert eve.post("/api/invites/made-up/accept").status_code == 404
+        assert alice.get("/api/workspace/members").json()["invites"] == []
+
+        # members read everything and manage nothing
+        assert bob.get("/api/summary").status_code == 200
+        assert bob.post("/api/workspace/invites", json={"email": "c@x.com"}).status_code == 403
+        assert bob.post("/api/import", json={"url": "acme/x"}).status_code == 403
+        assert bob.put("/api/settings", json={"llm_kind": "openai"}).status_code == 403
+        assert bob.put("/api/workspace/members/alice", json={"role": "member"}).status_code == 403
+        assert alice.put("/api/workspace/members/alice", json={"role": "member"}).status_code == 400  # last owner
+        assert alice.put("/api/workspace/members/bob", json={"role": "admin"}).json()["role"] == "admin"
+        assert bob.put("/api/workspace/members/alice", json={"role": "member"}).status_code == 403  # owners only
+        assert bob.post("/api/workspace/invites", json={"email": "c@x.com", "role": "owner"}).status_code == 403
+
+        # tenants don't get to point the LLM at the server's own network
+        for url in ("http://169.254.169.254/latest", "http://127.0.0.1:9000/v1", "http://10.0.0.5/v1"):
+            assert alice.put("/api/settings", json={"llm_kind": "openai", "llm_base_url": url}).status_code == 400, url
+        assert alice.put("/api/settings", json={"llm_kind": "openai", "llm_base_url": "http://llm:11434/v1"}).status_code == 200
+        alice.put("/api/settings", json={"llm_kind": "anthropic", "llm_base_url": ""})
+
+        # import (no GitHub configured here, so no access check): a URL in, a repository synced in this workspace
+        assert alice.post("/api/import", json={"url": "https://github.com/acme/extra.git"}).json()["repo"] == "acme/extra"
+        assert "acme/extra" in bob.get("/api/summary").json()["repos"]
+        assert alice.post("/api/import", json={"url": "other/Extra"}).status_code == 400  # same clone folder
+        for bad in ("../etc", "acme/..", "acme", "https://gitlab.com/acme/x"):
+            assert alice.post("/api/import", json={"url": bad}).status_code == 400, bad
+
+        # another tenant sees none of it, over the API or MCP, and can't switch in
+        eve_ws = eve.post("/api/workspaces", json={"name": "  Eve\nCorp "}).json()
+        assert eve_ws["name"] == "Eve Corp" and eve.get("/api/me").json()["role"] == "owner"
+        assert eve.post(f"/api/workspaces/{WS}/switch").status_code == 403
+        assert eve.get("/api/summary").json()["repos"] == [] and eve.get("/api/people").json() == []
+        assert [p["person"] for p in alice.get("/api/people").json()] == ["alice"]
+        count = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": "sql", "arguments": {"query": "SELECT COUNT(*) FROM commits"}}}
+        text = lambda ws: eve.post(f"/mcp/{mcp_token(ws)}", json=count).json()["result"]["content"][0]["text"]
+        assert '"rows": [[1]]' in text(WS) and '"rows": [[0]]' in text(eve_ws["id"])
+
+        alice.post("/api/admin/remove_repo", json={"repo": "acme/extra"})
+        assert "acme/extra" not in alice.get("/api/summary").json()["repos"]
+        assert bob.delete("/api/workspace/members/bob").json() == {"ok": True}  # leaving
+        assert bob.get("/api/summary").status_code == 409
+
+
+def test_import_goes_by_the_users_own_github_access(monkeypatch):
+    """The App may be installed on another tenant's private repository: only the user's own token decides."""
+    from fastapi.testclient import TestClient
+    from portal.github import GitHub, gh
+    from portal.main import app
+    readable = {"acme/site", "acme/noapp"}
+    tokens = []
+
+    class Reply:
+        def __init__(self, repo):
+            self.repo, self.status_code = repo, 200 if repo in readable else 404
+
+        def json(self):
+            return {"full_name": self.repo.replace("acme", "Acme")}  # GitHub's spelling wins
+
+    monkeypatch.setattr(GitHub, "mode", property(lambda self: "app"))
+    monkeypatch.setattr(gh, "request", lambda method, path, check=True, token=None, **kw:
+                        tokens.append(token) or Reply(path.removeprefix("/repos/")))
+    monkeypatch.setattr(gh, "installation", lambda repo: None if repo.endswith("noapp") else 1)
+    monkeypatch.setattr(gh, "install_url", lambda: "https://github.com/apps/portal/installations/new")
+    with TestClient(app) as c:
+        sign_in(c, "alice")
+        r = c.post("/api/import", json={"url": "https://github.com/other/private"})
+        assert r.status_code == 400 and r.json()["install_url"].endswith("/installations/new")
+        assert c.post("/api/import", json={"url": "acme/noapp"}).json()["install_url"]  # readable, but no App
+        assert c.post("/api/import", json={"url": "github.com/acme/site"}).json()["repo"] == "Acme/site"
+    assert set(tokens) == {"t-alice"}
+    db.cx("DELETE FROM repos WHERE repo='Acme/site'")
+
+
+def test_single_tenant_install_becomes_workspace_one(tmp_path, monkeypatch):
+    import sqlite3
+    import portal
+    from portal import workspace
+    for module in (portal, db):
+        monkeypatch.setattr(module, "DATA", tmp_path)
+    monkeypatch.setattr(db, "CONTROL", tmp_path / "control.db")
+    monkeypatch.setattr(db, "ADMINS", {"lead"})
+    old = sqlite3.connect(tmp_path / "portal.db")
+    old.executescript(db.SCHEMA)
+    old.execute("""INSERT INTO settings VALUES('extra_repos', '["acme/extra"]')""")
+    old.execute("INSERT INTO commits(repo, sha) VALUES('acme/extra', 'abc')")
+    old.commit()
+    old.close()
+    (tmp_path / "repos" / "Genegenius-backend").mkdir(parents=True)
+    db.init()
+    db.init()  # and again on the next start: nothing more happens
+    assert db.cq("SELECT id, name FROM workspaces") == [{"id": 1, "name": "GeneGeniusinc"}]
+    assert db.cq("SELECT login, role FROM members") == [{"login": "lead", "role": "owner"}]
+    assert not (tmp_path / "portal.db").exists() and (tmp_path / "workspaces/1/repos/Genegenius-backend").is_dir()
+    with workspace(1):
+        assert db.repos() == ["GeneGeniusinc/Genegenius-backend", "GeneGeniusinc/Genegenius-phase-1", "acme/extra"]
+        assert db.q("SELECT sha FROM commits") == [{"sha": "abc"}]
+        assert db.setting("views") == {"backend": "GeneGeniusinc/Genegenius-backend",
+                                       "frontend": "GeneGeniusinc/Genegenius-phase-1"}
 
 
 def test_pull_request_webhook_feeds_the_tools_and_mcp():
     from fastapi.testclient import TestClient
-    from portal import REPOS
+    from portal import workspace
     from portal.chat import run_tool
     from portal.main import app
     from portal.sync import handle_webhook
-    db.init()
+    db.add_repo(WS, "acme/app", "alice")
+    other = db.create_workspace("Other", "dave")  # imported the same repository: gets the same webhooks
+    db.add_repo(other, "acme/app", "dave")
     pr = {"number": 7, "title": "Add VCF parser", "user": {"login": "octo"}, "state": "open", "draft": False,
           "base": {"ref": "main"}, "head": {"ref": "feat/vcf", "sha": "a" * 40}, "created_at": "2026-10-01T00:00:00Z",
           "updated_at": "2026-10-02T00:00:00Z", "merged_at": None, "html_url": "https://github.com/x/pull/7"}
-    assert handle_webhook("pull_request", {"action": "edited", "repository": {"full_name": REPOS[0]},
-                                           "number": 7, "pull_request": pr}) == "queued"
+    event = {"action": "edited", "repository": {"full_name": "Acme/App"}, "number": 7, "pull_request": pr}
+    assert handle_webhook("pull_request", event) == "queued"
+    assert handle_webhook("pull_request", {**event, "repository": {"full_name": "acme/unknown"}}) == "ignored"
     assert '"title": "Add VCF parser"' in run_tool("pull_requests", {})
+    with workspace(other):
+        assert '"repo": "acme/app"' in run_tool("pull_requests", {})
     rpc = lambda c, body, **kw: c.post("/mcp", json=body, **kw)
     with TestClient(app) as c:
         assert rpc(c, {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 401  # no token
-        auth = {"headers": {"Authorization": "Bearer mcp-secret"}}
+        assert rpc(c, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers={"Authorization": "Bearer x"}).status_code == 401
+        auth = {"headers": {"Authorization": f"Bearer {mcp_token(WS)}"}}
         init = rpc(c, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                        "params": {"protocolVersion": "2025-06-18", "capabilities": {}}}, **auth).json()["result"]
         assert init["protocolVersion"] == "2025-06-18" and "tools" in init["capabilities"]
@@ -162,8 +316,8 @@ def test_pull_request_webhook_feeds_the_tools_and_mcp():
         tools = rpc(c, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, **auth).json()["result"]["tools"]
         assert {"pull_requests", "pull_request", "recent_pushes", "docs", "sql"} <= {t["name"] for t in tools}
         call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                "params": {"name": "pull_request", "arguments": {"repo": REPOS[0], "number": 7}}}
-        out = c.post("/mcp/mcp-secret", json=call).json()["result"]  # token in the URL, for ChatGPT and co
+                "params": {"name": "pull_request", "arguments": {"repo": "acme/app", "number": 7}}}
+        out = c.post(f"/mcp/{mcp_token(WS)}", json=call).json()["result"]  # token in the URL, for ChatGPT and co
         assert '"head": "feat/vcf"' in out["content"][0]["text"]
         assert rpc(c, {"jsonrpc": "2.0", "id": 4, "method": "nope"}, **auth).json()["error"]["code"] == -32601
 
@@ -171,11 +325,10 @@ def test_pull_request_webhook_feeds_the_tools_and_mcp():
 def test_generated_docs_follow_the_code():
     import subprocess
     from fastapi.testclient import TestClient
-    from portal import REPOS, docgen, repo_dir, sync
+    from portal import docgen, repo_dir, sync
     from portal.main import app
-    db.init()
     repo = "acme/tiny"
-    REPOS.append(repo)
+    db.add_repo(WS, repo, "alice")
     sync.DEFAULT_BRANCHES[repo] = "main"
     d = repo_dir(repo)
     files = {
@@ -218,7 +371,7 @@ def test_generated_docs_follow_the_code():
     assert docgen.search("documented")[0]["slug"] == "modules/services"
 
     with TestClient(app) as c:
-        c.post("/auth/password", data={"password": "viewer-pw", "next": "/"})
+        sign_in(c, "alice")
         hist = c.get("/api/docs/tiny/history/modules/services").json()
         assert len(hist) == 2 and "Now documented" in c.get(f"/api/docs/tiny/diff/{hist[0]['id']}").json()["diff"]
         assert c.get("/api/docs/tiny/modules/services?download=1").headers["content-disposition"].endswith('services.md"')
@@ -235,7 +388,6 @@ def test_generated_docs_follow_the_code():
     assert all(r["status"] == "written" for r in rows)  # the API reference needs no prose, so it counts as written
     services = next(r for r in rows if r["slug"] == "modules/services")
     assert services["summary"] == "Written for module." and services["content"].index("Written for") < services["content"].index("## Reference")
-    REPOS.remove(repo)
 
 
 def test_ask_goes_before_background_work():

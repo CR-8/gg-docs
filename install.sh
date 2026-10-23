@@ -5,9 +5,11 @@
 #
 #   bash install.sh 35.253.245.77
 #
-# Optional, to fill the GitHub App values in one go (otherwise edit .env later and re-run):
-#   GITHUB_APP_ID=123456 GITHUB_CLIENT_ID=Iv23li... GITHUB_CLIENT_SECRET=... ADMINS=your-login \
+# The GitHub App (sign-in, cloning, webhooks; README 3.1), in one go (otherwise edit .env later and re-run):
+#   GITHUB_APP_ID=123456 GITHUB_CLIENT_ID=Iv23li... GITHUB_CLIENT_SECRET=... \
 #   APP_KEY=~/genegenius-reviewer.private-key.pem  bash install.sh 35.253.245.77
+# Email for team invites (any SMTP provider; without it, invite links are copied by hand):
+#   SMTP_HOST=smtp.resend.com SMTP_USER=resend SMTP_PASSWORD=... SMTP_FROM=portal@yourdomain bash install.sh <ip>
 # Run a coder model on this VM for reviews and the chatbot (Ollama, Qwen2.5-Coder Q8 sized to the RAM):
 #   LOCAL_LLM=auto bash install.sh 35.253.245.77        # or an Ollama tag, e.g. qwen2.5-coder:7b-instruct-q8_0
 #   LOCAL_LLM=off  bash install.sh 35.253.245.77        # switch it off again
@@ -89,10 +91,8 @@ setkv SONAR_PUBLIC_URL "https://$DOMAIN/sonar"
 fill SESSION_SECRET "$(openssl rand -hex 32)"
 fill SONAR_DB_PASSWORD "$(openssl rand -hex 24)"
 fill GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 32)"
-fill PORTAL_PASSWORD "$(openssl rand -hex 10)"                   # login without the GitHub App: sees everything
-fill ADMIN_PASSWORD "$(openssl rand -hex 10)"                    # ... and can change Settings
-fill MCP_TOKEN "$(openssl rand -hex 24)"                         # coding agents (Claude Code, Codex, ChatGPT) over MCP
-for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS EXTRA_REPOS; do
+for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS EXTRA_REPOS \
+         SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_FROM; do
   if [ -n "${!k:-}" ]; then setkv "$k" "${!k}"; fi
 done
 
@@ -179,33 +179,26 @@ if [ -n "$(getkv GITHUB_APP_ID)" ] && $SUDO test -f secrets/github-app.pem; then
 
 cat <<EOF
 
-Portal     https://$DOMAIN
-           viewer password  $(getkv PORTAL_PASSWORD)
-           admin password   $(getkv ADMIN_PASSWORD)   (can change Settings: LLM key, Sonar token)
+Portal     https://$DOMAIN   (Continue with GitHub, create a workspace, import repositories)
 SonarQube  https://$DOMAIN/sonar   (first login admin / admin, then change it)
-MCP        https://$DOMAIN/mcp/$(getkv MCP_TOKEN)
-           (Claude Code, Codex, ChatGPT, Mistral: Settings shows the exact command for each)
+MCP        each workspace has its own: Settings -> Connect a coding agent
 EOF
+if [ -n "$(getkv SMTP_HOST)" ]; then echo "Invites    emailed through $(getkv SMTP_HOST)"
+else echo "Invites    no SMTP_HOST, so people copy invite links from Settings"; fi
 if [ -n "$LLM_TAG" ]; then
   echo "Local model  $LLM_TAG   (Settings lists every downloaded model; one click switches to it)"
-fi
-if [ -z "$(getkv GITHUB_TOKEN)" ] && [ -z "$app_ready" ]; then
-  cat <<EOF
-
-Needed: read access to the two private repos, or the portal has no code to show.
-  Create a read-only token (README "GitHub access"), then:
-  GITHUB_TOKEN=<token> bash install.sh $IP
-EOF
 fi
 if [ -z "$app_ready" ]; then
   cat <<EOF
 
-Optional, the GitHub App (Sign in with GitHub, instant webhooks, reviews posted on PRs).
-Create it at github.com/organizations/GeneGeniusinc/settings/apps with:
+Needed: the GitHub App. People sign in with it, and it clones the repositories they import and sends their webhooks.
+Create it (README 3.1) with:
   Homepage URL    https://$DOMAIN
   Callback URL    https://$DOMAIN/auth/callback
+  Setup URL       https://$DOMAIN/new/   (tick "Redirect on update")
   Webhook URL     https://$DOMAIN/webhook/github
   Webhook secret  $(getkv GITHUB_WEBHOOK_SECRET)
-then re-run with GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, ADMINS and APP_KEY (see the top of this file).
+  Installable by  Any account
+then re-run with GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and APP_KEY (see the top of this file).
 EOF
 fi

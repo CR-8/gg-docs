@@ -1,5 +1,6 @@
 """Git sync worker: clone/fetch, ingest commits, pushes and CI results, detect breakages, and schedule
-view rebuilds, reviews and Sonar scans. One worker thread runs jobs in order; a poller backs up the webhooks."""
+view rebuilds, reviews and Sonar scans. One worker thread runs jobs in order; a poller backs up the webhooks.
+Every job carries the workspace it was queued from and runs inside it."""
 import hashlib
 import os
 import queue
@@ -14,8 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
-from . import (BACKEND_REPO, BACKFILL_DAYS, DATA, DEFAULT_BRANCHES, FRONTEND_REPO, GIT_URL, POLL_SECONDS, REPOS,
-               ROOT, SITE, SONAR_KEYS, SONAR_URL, WORK, db, llm, repo_dir)
+from . import (BACKFILL_DAYS, DEFAULT_BRANCHES, GIT_URL, POLL_SECONDS, ROOT, SONAR_KEYS, SONAR_URL, WORKSPACE, db, llm,
+               repo_dir, site_dir, work_dir, workspace, ws_dir)
 from .github import gh
 
 ZERO = "0" * 40
@@ -39,6 +40,7 @@ def log(kind, detail, ok=True):
 
 
 def enqueue(*job):
+    job = (WORKSPACE.get(), *job)
     with _lock:
         if job in _pending:
             return
@@ -49,7 +51,7 @@ def enqueue(*job):
 # ---------- git ----------
 
 def git(repo, *args, auth=False):
-    r = subprocess.run(["git", *(gh.git_auth() if auth else []), *args], cwd=repo_dir(repo),
+    r = subprocess.run(["git", *(gh.git_auth(repo) if auth else []), *args], cwd=repo_dir(repo),
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:
         raise RuntimeError(f"git {args[0]} ({repo}): {r.stderr.strip()[-500:]}")
@@ -67,10 +69,10 @@ def fetch(repo):
         return
     d.parent.mkdir(parents=True, exist_ok=True)
     url = GIT_URL.format(repo=repo, name=repo.split("/")[1])
-    r = subprocess.run(["git", *gh.git_auth(), "clone", "--quiet", url, str(d)], capture_output=True, text=True)
+    r = subprocess.run(["git", *gh.git_auth(repo), "clone", "--quiet", url, str(d)], capture_output=True, text=True)
     if r.returncode:
-        hint = "" if gh.enabled else (" | The repo is private: set GITHUB_TOKEN (a read-only token) or the GitHub App "
-                                      "in .env, then re-run install.sh")
+        hint = "" if gh.enabled else (" | The repo is private: set the GitHub App (or GITHUB_TOKEN, a read-only "
+                                      "token) in .env, then re-run install.sh")
         raise RuntimeError(f"git clone {repo}: {r.stderr.strip()[-500:]}{hint}")
 
 
@@ -83,8 +85,20 @@ def default_branch(repo):
     return _defaults[repo]
 
 
+def views():
+    """(backend, frontend): the pair the architecture views and SonarQube are built from, or () for none.
+    ponytail: only a workspace migrated from the single-tenant install has one (build.py expects a FastAPI backend
+    and a Next.js frontend, and SONAR_KEYS are fixed names); add a picker in Settings when other tenants want it."""
+    v = db.setting("views")
+    return (v["backend"], v["frontend"]) if v else ()
+
+
+def sonar_keys():
+    return dict(zip(views(), SONAR_KEYS))
+
+
 def checkout_defaults():
-    for repo in (BACKEND_REPO, FRONTEND_REPO):  # the two the views are built from
+    for repo in views():
         branch = default_branch(repo)
         git(repo, "checkout", "--quiet", "--force", "-B", branch, f"origin/{branch}")
 
@@ -240,8 +254,9 @@ def check_head(repo):
     if head == seen:
         return
     db.set_setting(f"head:{repo}", head)
-    enqueue("rebuild")
-    enqueue("sonar")
+    if repo in views():
+        enqueue("rebuild")
+        enqueue("sonar")
     if seen:  # the first sync only sets the baseline
         enqueue("review_push", repo, branch, seen, head)
 
@@ -305,8 +320,8 @@ def backend_python():
     """A venv with the backend's requirements, rebuilt when requirements.txt changes (for the OpenAPI export)."""
     if os.environ.get("BACKEND_PYTHON"):
         return os.environ["BACKEND_PYTHON"]
-    req = repo_dir(BACKEND_REPO) / "requirements.txt"
-    venv = DATA / "venvs" / "backend"
+    req = repo_dir(views()[0]) / "requirements.txt"
+    venv = ws_dir() / "venvs" / "backend"
     py = venv / ("Scripts/python.exe" if WIN else "bin/python")
     digest = hashlib.sha256(req.read_bytes()).hexdigest() if req.exists() else ""
     if digest != db.setting("backend_requirements") or not py.exists():
@@ -322,7 +337,7 @@ def backend_python():
 
 def frontend_modules():
     """npm ci in the frontend clone when its lockfile changes (dependency-cruiser resolves through node_modules)."""
-    d = repo_dir(FRONTEND_REPO)
+    d = repo_dir(views()[1])
     lock = d / "package-lock.json"
     digest = hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else ""
     if digest and (digest != db.setting("frontend_lock") or not (d / "node_modules").exists()):
@@ -335,8 +350,9 @@ def frontend_modules():
 
 
 def build_env(**extra):
-    return dict(os.environ, BACKEND_DIR=str(repo_dir(BACKEND_REPO)), FRONTEND_DIR=str(repo_dir(FRONTEND_REPO)),
-                SITE_DIR=str(SITE), WORK_DIR=str(WORK), **extra)
+    backend, frontend = views()
+    return dict(os.environ, BACKEND_DIR=str(repo_dir(backend)), FRONTEND_DIR=str(repo_dir(frontend)),
+                SITE_DIR=str(site_dir()), WORK_DIR=str(work_dir()), **extra)
 
 
 def run_build(*steps, **env):
@@ -347,6 +363,8 @@ def run_build(*steps, **env):
 
 
 def rebuild():
+    if not views():
+        return
     checkout_defaults()
     py = backend_python()
     frontend_modules()
@@ -360,8 +378,10 @@ def sonar_token():
 
 def sonar():
     token = sonar_token()
-    heads = {r: git(r, "rev-parse", f"origin/{default_branch(r)}").strip() for r in SONAR_KEYS}
-    if not token or heads == db.setting("sonar_heads") or time.time() - db.setting("sonar_at", 0) < 900:
+    if not (token and views()):
+        return
+    heads = {r: git(r, "rev-parse", f"origin/{default_branch(r)}").strip() for r in views()}
+    if heads == db.setting("sonar_heads") or time.time() - db.setting("sonar_at", 0) < 900:
         return  # no token, nothing new, or scanned in the last 15 min (the poller retries)
     checkout_defaults()
     ok, detail = run_build("sonar", SONAR_TOKEN=token, SONAR_HOST_URL=SONAR_URL)
@@ -376,7 +396,7 @@ def sonar_snapshot():
     if not token:
         return
     today, rows = date.today().isoformat(), []
-    for repo, key in SONAR_KEYS.items():
+    for repo, key in sonar_keys().items():
         for quality in ("RELIABILITY", "SECURITY", "MAINTAINABILITY"):
             r = httpx.get(f"{SONAR_URL}/api/issues/search", timeout=30, headers={"Authorization": f"Bearer {token}"},
                           params={"components": key, "impactSoftwareQualities": quality,
@@ -391,9 +411,17 @@ def sonar_snapshot():
 
 
 def handle_webhook(event, payload):
+    """One GitHub App delivers the webhooks of every tenant: each workspace that imported the repository gets it."""
     repo = (payload.get("repository") or {}).get("full_name")
-    if repo not in REPOS:
-        return "ignored"
+    targets = db.cq("SELECT workspace_id, repo FROM repos WHERE repo=?", repo) if repo else []
+    results = set()
+    for t in targets:
+        with workspace(t["workspace_id"]):
+            results.add(on_webhook(event, payload, t["repo"]))
+    return "queued" if "queued" in results else "ignored"
+
+
+def on_webhook(event, payload, repo):
     if event == "push" and payload.get("ref", "").startswith("refs/heads/"):
         remember_identities([(c["author"].get("email"), c["author"].get("username"), c["author"].get("name"))
                              for c in payload.get("commits", []) if c.get("author")])
@@ -418,41 +446,55 @@ def handlers():
 
 
 def worker():
+    # ponytail: one worker for every workspace, in arrival order; a pool with per-workspace fairness when
+    # one tenant's big syncs keep the others waiting.
     run = handlers()
     while True:
         job = jobs.get()
         with _lock:
             _pending.discard(job)
-        try:
-            run[job[0]](*job[1:])
-        except Exception as e:  # one bad job must not stop the queue
-            log(job[0], f"{job[1:]}: {e!r}", False)
-            traceback.print_exc()
+        ws, kind, *args = job
+        with workspace(ws):
+            try:
+                run[kind](*args)
+            except Exception as e:  # one bad job must not stop the queue
+                log(kind, f"{tuple(args)}: {e!r}", False)
+                traceback.print_exc()
 
 
 def poller():
     last_snapshot = 0.0
     while True:
-        for repo in REPOS:
-            enqueue("sync", repo)
-        enqueue("sonar")
-        if time.time() - last_snapshot > 3600:
-            enqueue("sonar_snapshot")
+        snapshot = time.time() - last_snapshot > 3600
+        for w in db.cq("SELECT id FROM workspaces"):
+            with workspace(w["id"]):
+                for repo in db.repos():
+                    enqueue("sync", repo)
+                if views():
+                    enqueue("sonar")
+                    if snapshot:
+                        enqueue("sonar_snapshot")
+                db.x("DELETE FROM events WHERE id < (SELECT MAX(id) - 5000 FROM events)")
+        if snapshot:
             last_snapshot = time.time()
-        db.x("DELETE FROM events WHERE id < (SELECT MAX(id) - 5000 FROM events)")
         time.sleep(POLL_SECONDS)
 
 
 def start():
     from . import docgen
-    if not (SITE / "overview.json").exists() and all((repo_dir(r) / ".git").exists() for r in SONAR_KEYS):
-        enqueue("rebuild")  # views built before the Overview page read overview.json
+    for w in db.cq("SELECT id FROM workspaces"):
+        with workspace(w["id"]):
+            if views() and not (site_dir() / "overview.json").exists() \
+                    and all((repo_dir(r) / ".git").exists() for r in views()):
+                enqueue("rebuild")  # views built before the Overview page read overview.json
     docgen.start()
     for target in (worker, poller):
         threading.Thread(target=target, daemon=True, name=target.__name__).start()
 
 
 def status():
+    """The current workspace's waiting jobs."""
+    ws = WORKSPACE.get()
     with _lock:
-        pending = sorted({job[0] for job in _pending})
-    return {"queued": jobs.qsize(), "pending": pending}
+        mine = [job[1] for job in _pending if job[0] == ws]
+    return {"queued": len(mine), "pending": sorted(set(mine))}

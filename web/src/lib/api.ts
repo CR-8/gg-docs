@@ -1,14 +1,19 @@
 import { useEffect, useReducer, useState } from "react"
 
-/** JSON from the portal API; a lapsed session goes to sign-in and comes back here afterwards. */
+/** JSON from the portal API; a lapsed session goes to sign-in and comes back here afterwards, and someone in no
+ * workspace yet goes to the welcome page. */
 export async function api<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts })
   if (r.status === 401) {
     location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.search)
     return new Promise(() => {})
   }
+  if (r.status === 409 && !location.pathname.startsWith("/welcome")) {
+    location.href = "/welcome/"
+    return new Promise(() => {})
+  }
   const data = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(data.error || data.detail || r.statusText)
+  if (!r.ok) throw Object.assign(new Error(data.error || data.detail || r.statusText), { data })
   return data
 }
 
@@ -33,7 +38,16 @@ export function useApi<T = any>(path: string | null) {
   return { ...state, reload }
 }
 
-export type Me = { login: string; admin: boolean } | null
+export type Role = "owner" | "admin" | "member"
+export type Workspace = { id: number; name: string; role: Role }
+export type Me = {
+  login: string
+  avatar_url: string | null
+  admin: boolean // owner or admin of the current workspace
+  role: Role | null
+  workspace: { id: number; name: string } | null
+  workspaces: Workspace[]
+} | null
 let mePromise: Promise<Me> | undefined
 export const getMe = () => (mePromise ??= api<Me>("/api/me").catch(() => null))
 
@@ -44,6 +58,9 @@ export function useMe() {
   }, [])
   return me
 }
+
+/** Opens another of my workspaces: the session remembers it, so every page and API call follows. */
+export const switchTo = (id: number, to = "/") => post(`/api/workspaces/${id}/switch`).then(() => (location.href = to))
 
 export const short = (sha?: string | null) => (sha || "").slice(0, 8)
 export const repoName = (repo?: string | null) => (repo || "").split("/")[1] || repo || ""

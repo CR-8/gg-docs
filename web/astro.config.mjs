@@ -10,6 +10,6 @@ export default defineConfig({
   integrations: [react()],
   vite: {
     plugins: [tailwindcss()],
-    server: { proxy: { "/api": portal, "/auth": portal, "/site": portal } },
+    server: { proxy: { "/api": portal, "/auth": portal, "/site": portal, "/invite": portal } },
   },
 })

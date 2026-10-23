@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Import } from "@/components/Import"
+---
+
+<Layout title="Import a repository" description="It is cloned into this workspace, then kept current by GitHub webhooks: every push and pull request is synced, reviewed and documented.">
+  <Import client:only="react" />
+</Layout>

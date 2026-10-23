@@ -13,6 +13,10 @@ A self-hosted dashboard that stays in sync with the GeneGenius GitHub repositori
 | Anything across all of the above, in plain language | **Ask** (the chatbot) |
 | Bugs, code smells and security hotspots from static analysis | **SonarQube** at `/sonar` |
 | All of it inside your coding agent (Claude Code, Codex, ChatGPT, Mistral, Cursor, any MCP client) | the **MCP server** at `/mcp` (1.14) |
+| Your team: who is in, invites by email, which repositories are synced | **Settings → Team**, **Import** (1.15) |
+
+One portal serves many teams: each **workspace** has its own repositories, members, settings and data (1.15). Sign in
+with GitHub, create a workspace, paste a repository URL, and it is cloned and kept in sync by webhooks.
 
 Tests stay in your CI. The portal reads the CI results (GitHub check runs) and never runs your test suites itself.
 
@@ -71,16 +75,19 @@ depcruise.cjs         dependency-cruiser rules for the frontend (circular, orpha
 package.json/-lock    Node tools build.py uses (dependency-cruiser, typescript)
 requirements.txt      Python dependencies of the portal (pinned)
 portal/
-  __init__.py         Configuration: every environment variable is read here
-  db.py               SQLite schema and helpers
-  github.py           GitHub App auth, REST helpers, OAuth login, webhook signature check
+  __init__.py         Configuration (every environment variable is read here) and WORKSPACE, the current tenant
+  db.py               SQLite: control.db (users, workspaces, members, invites) and each workspace's database;
+                      the single-tenant upgrade
+  github.py           GitHub App auth (a token per installation), REST helpers, OAuth login, webhook signature
   sync.py             Worker + poller: clone/fetch, ingest, breakage detection, rebuild/sonar scheduling
   review.py           The review bot
   llm.py              One interface over Claude-compatible and OpenAI-compatible APIs
   chat.py             The chatbot's tools and loop
   docgen.py           The documentation writer: code analysis, diagrams, LLM prose, incremental updates, its own worker
   mcp.py              The MCP server (Streamable HTTP) over the same tools as the chatbot
-  main.py             Web app: login, webhook endpoint, JSON API, MCP endpoint, serves web/dist and the views
+  main.py             Web app: login, workspaces, members and invites, import, webhook endpoint, JSON API, MCP
+                      endpoint, serves web/dist and the views
+  mail.py             Invite emails over SMTP
 web/                  The frontend: Astro pages (src/pages), React islands (src/components), shadcn/ui and Kibo UI
                       components (src/components/ui, kibo-ui); `npm run build` writes web/dist
 tests/test_portal.py  Checks for the logic that is easy to get subtly wrong
@@ -255,19 +262,27 @@ Admins choose in **Settings**:
 
 ### 1.11 Login and security
 
-- **Two ways to log in**, either or both:
-  - **Passwords** (`PORTAL_PASSWORD` for viewers, `ADMIN_PASSWORD` for admins). `install.sh` generates them. Wrong guesses are slowed down.
-  - **Sign in with GitHub**, when the GitHub App is set up. It uses the App's OAuth flow, with a random `state` checked on return. After login, the portal checks with the App's installation token that the user is a member of `GITHUB_ORG`; non-members are refused.
+- **Sign in with GitHub** (the App's user authorization, with a random `state` checked on return) is the only way in.
+  Anyone with a GitHub account can sign in; what they see is decided by the workspaces they belong to (1.15). The
+  user's GitHub token is kept (and refreshed when it expires) only to check, at import, that they can read the
+  repository.
 - **Session:** a cookie signed with `SESSION_SECRET`, `SameSite=Lax`, `Secure` when `PUBLIC_URL` is https, valid for 7 days.
-- **Every page and API needs a login**, except `/auth/*`, `/healthz` and the webhook (which needs a valid signature instead).
-- **Admins** (the admin password, or GitHub logins listed in `ADMINS`) are the only ones who can change Settings, test the LLM, or trigger sync, rebuild and review.
-- **Secrets:** the GitHub App private key is a mounted file (`secrets/github-app.pem`, read-only). LLM and Sonar keys sit in the database volume and are never sent to browsers. The container runs as a non-root user.
+  It also remembers which of your workspaces you are in; every request is checked against your current membership.
+- **Every page and API needs a login**, except `/auth/*`, `/healthz`, `/invite/*` (which sends you to sign in), `/mcp`
+  (its own token) and the webhook (which needs a valid signature instead).
+- **Owners and admins** of a workspace are the only ones who can change its Settings, test the LLM, invite people,
+  import or remove repositories, or trigger sync, rebuild and review. Members see everything in the workspace.
+- **Tenants can't reach the server's insides:** a workspace's LLM base URL must be a public address (or the local
+  model), so nobody can point it at cloud metadata, SonarQube or other containers (`ALLOW_PRIVATE_LLM=1` lifts that on
+  a server one trusted team uses).
+- **Secrets:** the GitHub App private key is a mounted file (`secrets/github-app.pem`, read-only). LLM and Sonar keys sit in the database volume and are never sent to browsers. Invite links are stored hashed. The container runs as a non-root user.
 - **Untrusted text** (diffs, commit messages, review text) is shown escaped. Chatbot answers are rendered as Markdown and sanitised with DOMPurify.
 - `DEV_USER` (automatic login for local development) only works when GitHub login is **not** configured and only for requests from the same machine.
 
 ### 1.12 Data model
 
-SQLite at `/data/portal.db` (the chatbot sees this schema):
+One SQLite database per workspace, `/data/workspaces/<id>/portal.db` (that workspace's chatbot sees this schema, and
+only this database). Users, workspaces, members, invites and imported repositories are in `/data/control.db` (1.15).
 
 | Table | One row per | Key columns |
 |---|---|---|
@@ -295,7 +310,12 @@ Everything the pages show comes from these endpoints (login required):
 | `GET /api/events` | The last 100 job runs |
 | `GET /api/docs` · `GET /api/docs/{repo}/{slug}` (`?download=1` for the .md) · `GET /api/docs/{repo}/zip` | Generated documents with their status · one document · a repository's set as a .zip |
 | `GET /api/docs/search?q=` · `/api/docs/{repo}/history/{slug}` · `/api/docs/{repo}/diff/{version}` | Full-text search · versions · what a version changed |
-| `POST /api/admin/docs` `{"repo", "slug"?}` · `/add_repo` · `/remove_repo` `{"repo"}` | Rewrite documents · add or remove a repository (admin) |
+| `POST /api/admin/docs` `{"repo", "slug"?}` · `/remove_repo` `{"repo"}` | Rewrite documents · stop syncing a repository (admin) |
+| `GET /api/me` · `POST /api/workspaces` `{"name"}` · `POST /api/workspaces/{id}/switch` · `PUT /api/workspace` `{"name"}` | Who you are and your workspaces · create one · open one · rename (admin) |
+| `GET /api/workspace/members` · `PUT`/`DELETE /api/workspace/members/{login}` `{"role"}` | Members and pending invites · change a role or remove someone (admin; leaving is yours) |
+| `POST /api/workspace/invites` `{"email", "role"}` · `DELETE /api/workspace/invites/{id}` | Invite by email (admin; returns the link too) · revoke |
+| `GET /invite/{token}` · `GET /api/invites/{token}` · `POST /api/invites/{token}/accept` | The emailed link (sign in, then the Join page) · what it is for · join |
+| `GET /api/import/repos` · `POST /api/import` `{"url"}` | Repositories you can import through the App · import one by URL (admin) |
 | `GET /api/settings/local` · `GET /api/settings/mcp` | Models downloaded into the local Ollama · MCP connection details (admin) |
 | `POST /mcp` | The MCP server (1.14) |
 | `POST /api/chat` `{"history": [...], "question": "..."}` | `{"answer", "steps"}` |
@@ -310,13 +330,62 @@ the chatbot's tools (1.9) with larger results: PRs being worked on and updated, 
 breakages, people, SonarQube, the code graph, and the generated documentation. Its instructions explain every table.
 
 - **Read-only** and stateless: every request is one JSON-RPC call answered with JSON, so there are no sessions to lose.
-- **Auth** is `MCP_TOKEN` (`install.sh` generates it): `Authorization: Bearer <token>`, or the token in the URL
-  (`/mcp/<token>`) for clients that only take a URL, such as ChatGPT and Le Chat. The URL is then a secret.
+- **Auth** is the workspace's own MCP token (made with the workspace; the token decides which workspace the agent
+  sees): `Authorization: Bearer <token>`, or the token in the URL (`/mcp/<token>`) for clients that only take a URL,
+  such as ChatGPT and Le Chat. The URL is then a secret.
 - **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
   ```bash
   claude mcp add --transport http genegenius https://<domain>/mcp --header "Authorization: Bearer <token>"
   codex mcp add genegenius --url https://<domain>/mcp/<token>
   ```
+
+### 1.15 Workspaces, teams and importing repositories
+
+**Workspaces.** Everyone who signs in can create workspaces and belong to several; the menu at the top right switches
+between them. Each workspace has its own folder, `/data/workspaces/<id>/`, with its database (1.12), clones (`repos/`),
+architecture views (`site/`, `work/`) and venvs. A request runs inside the workspace your session points at, a
+background job inside the workspace that queued it, and an MCP call inside the workspace its token belongs to; code
+that reads a workspace's data outside one fails instead of guessing. So one team can never see another's commits,
+reviews, docs or settings, including through Ask's raw SQL.
+
+| Role | Can |
+|---|---|
+| **owner** | everything, including making, unmaking and removing owners. A workspace always keeps at least one. |
+| **admin** | invite and remove members and admins, import and remove repositories, Settings, sync, rebuild, review |
+| **member** | see everything in the workspace, ask questions; change nothing |
+
+**Invites (Settings → Team).** An owner or admin enters an email address and a role. The portal emails a link through
+`SMTP_HOST` (any provider: SES, SendGrid, Resend, Postmark, Mailgun) and also shows it, so it can be sent another way;
+without SMTP it is only shown. Opening the link asks the person to sign in with GitHub, then to confirm with a Join
+button (so no other website can quietly sign someone into a workspace), and adds them with that role.
+A link works **once**, for **7 days**, is stored only as a hash, and can be revoked while it waits. At most 50 invites
+a day per workspace, so the server's mail can't be used for spam.
+
+**Importing a repository (Import, `/new/`)**, the way Vercel does it:
+
+1. Paste a URL (`https://github.com/owner/name`, with `.git` or a `/tree/...` path, `git@github.com:owner/name.git`, or
+   `owner/name`), or pick one from **Your GitHub repositories**: every repository your GitHub account reaches through
+   the App's installations, newest push first.
+2. The portal asks GitHub **with your own token** whether you can read it. Many teams share the one App, so the App
+   being able to read a repository is not enough: you must be able to as well. Then it checks that the App is
+   installed on it (it clones it, reads CI and sends its webhooks). If either is missing you get an **Install the
+   GitHub App** button; GitHub sends you back to Import afterwards (the App's Setup URL).
+3. The repository is cloned into the workspace, its history, PRs and CI are read, and its documentation is written.
+4. From then on every push, PR and check run arrives by webhook. One App delivers every tenant's webhooks; each
+   delivery goes to every workspace that imported that repository. The 5-minute poll backs them up.
+
+Removing a repository stops syncing it; its history and clone stay, and importing it again picks them back up. Two
+repositories with the same name can't share a workspace (one clone folder and docs URL per name).
+
+**Architecture views and SonarQube** (1.5, 1.8) need a FastAPI backend and a Next.js frontend paired up, so only a
+workspace upgraded from a single-tenant install has them. Every workspace gets the generated docs (1.5a).
+
+**Upgrading a single-tenant install.** On the first start of this version, an existing `/data/portal.db` (with
+`repos/`, `site/`, `work/` and `venvs/`) moves into workspace 1, named after `GITHUB_ORG`, with `BACKEND_REPO`,
+`FRONTEND_REPO`, `EXTRA_REPOS` and the repositories added in Settings, its architecture views, and `MCP_TOKEN` as its
+MCP token, so connected coding agents keep working. The GitHub logins in `ADMINS` own it; they invite everyone else.
+The shared viewer and admin passwords are gone: a password says nothing about who someone is, so it can't make anyone a
+member of anything. Reconfigure the GitHub App as in 3.1 (installable by any account, Setup URL).
 
 ---
 
@@ -352,9 +421,10 @@ GitHub → **GeneGeniusinc** → Settings → Developer settings → GitHub Apps
 | Webhook → Active, URL | `PUBLIC_URL/webhook/github` |
 | Webhook secret | a long random string (`openssl rand -hex 32`); the same value goes in `GITHUB_WEBHOOK_SECRET` |
 | Repository permissions | Contents: **Read** · Metadata: **Read** · Pull requests: **Read and write** · Checks: **Read** |
-| Organization permissions | Members: **Read** |
+| Account permissions | none needed |
 | Subscribe to events | **Push**, **Pull request**, **Check run**, **Check suite** |
-| Where can this app be installed | Only on this account |
+| Setup URL | `PUBLIC_URL/new/`, with **Redirect on update** ticked (people land back on Import after installing) |
+| Where can this app be installed | **Any account**: every team installs it on its own repositories |
 
 Then, on the app's page:
 
@@ -382,39 +452,20 @@ bash install.sh <vm-public-ip>          # e.g. bash install.sh 35.253.245.77
 5. Writes `.env`:
    - `PUBLIC_URL`, `DOMAIN` and `SONAR_PUBLIC_URL` use **`<ip-with-dashes>.sslip.io`** (e.g. `35-253-245-77.sslip.io`), a free DNS name that points at your IP, so Caddy can get a real HTTPS certificate without you owning a domain.
    - Ports 7000/7010 are bound to localhost.
-   - `PORTAL_PASSWORD`, `ADMIN_PASSWORD`, `SESSION_SECRET`, `SONAR_DB_PASSWORD` and `GITHUB_WEBHOOK_SECRET` are generated once and kept on later runs.
+   - `SESSION_SECRET`, `SONAR_DB_PASSWORD` and `GITHUB_WEBHOOK_SECRET` are generated once and kept on later runs.
 6. Starts the stack with HTTPS and waits until it answers.
-7. Prints the portal's address, **the viewer and admin passwords**, and anything still needed.
+7. Prints the portal's address and anything still needed.
 
-**Then give it read access to the repos** (see "GitHub access" just below) and re-run once:
-
-```bash
-GITHUB_TOKEN=<read-only token> bash install.sh <vm-public-ip>
-```
-
-The token is kept in `.env`, so later runs don't need it again. That's all that's needed: the views, activity, people, CI results, reviews in the portal, the chatbot and SonarQube all work. The GitHub App is an optional extra.
+**Then add the GitHub App** (see "GitHub access" just below): people sign in with it, and it clones the repositories
+they import and sends their webhooks.
 
 #### GitHub access
 
-The two repositories are private, so the portal needs read access to them. Pick a level:
-
-| Level | Set | What works |
-|---|---|---|
-| **Read-only token** (enough) | `GITHUB_TOKEN` | Everything in the portal: architecture views, commits, people, pushes, CI results and breakages, reviews in the portal, chatbot, SonarQube. Updates every 5 minutes. Log in with the portal passwords. |
-| **GitHub App** (optional, adds) | `GITHUB_APP_*` + key (3.1) | Sign in with GitHub (org members only), instant updates through webhooks, and reviews posted on PRs as `genegenius-reviewer[bot]`. When set, it is used instead of the token. |
-| Neither | | The portal and SonarQube run and you can log in, but there's no code to show. Settings → Recent jobs says why. |
-
-**Creating the read-only token:** GitHub → your avatar → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token:
-
-- **Resource owner:** GeneGeniusinc
-- **Repository access:** Only select repositories → `Genegenius-backend`, `Genegenius-phase-1`
-- **Repository permissions, all Read-only:**
-  - Contents and Metadata: the code, commits and push events.
-  - Pull requests: reviews of PRs.
-  - Checks and Commit statuses: CI results.
-- **Expiration:** as your org allows. When it expires, run `GITHUB_TOKEN=<new> bash install.sh <ip>` again.
-
-If GeneGeniusinc requires approval for fine-grained tokens, an org owner approves it under the org's Settings → Personal access tokens. If a permission is missing, only that feature is skipped (shown under Settings → Recent jobs); everything else keeps working.
+| Set | What works |
+|---|---|
+| **GitHub App** (`GITHUB_APP_*` + key, 3.1) | Everything: Continue with GitHub, workspaces, importing any repository the App is installed on (each team installs it on its own), instant updates through webhooks, reviews posted on PRs |
+| `GITHUB_TOKEN` only | One operator's setup or local development: nobody can sign in except `DEV_USER` on the machine itself; every repository is read with that token and polled every 5 minutes |
+| Neither | The portal runs, `DEV_USER` can sign in locally and import public repositories or local folders |
 
 #### Local model (optional)
 
@@ -451,13 +502,13 @@ fresh volume (`OLLAMA_DIR`), so models you pulled before are used as they are. A
 
 Settings can override all of this at any time. Pointing it at a hosted model (Claude or OpenAI) or at your own llama.cpp server (`llama-server --jinja`, which serves the same OpenAI-compatible API) takes effect immediately.
 
-#### Adding the GitHub App later (optional)
+#### Adding the GitHub App
 
 1. Create the GitHub App (3.1) with the URLs the script printed.
 2. Copy its private key to the VM: `scp <key>.pem <user>@<vm-ip>:~/gg-portal/app.pem`
 3. Re-run with the App's values:
    ```bash
-   GITHUB_APP_ID=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... ADMINS=<your-github-login> \
+   GITHUB_APP_ID=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... \
    APP_KEY=~/gg-portal/app.pem bash install.sh <vm-public-ip>
    rm ~/gg-portal/app.pem      # the script copied it into secrets/
    ```
@@ -534,7 +585,7 @@ GITHUB_APP_ID=...
 GITHUB_CLIENT_ID=...
 GITHUB_CLIENT_SECRET=...
 GITHUB_WEBHOOK_SECRET=...          # same value as in the GitHub App
-ADMINS=your-github-login,another-login
+ADMINS=your-github-login          # upgrading a single-tenant install only: owners of its workspace (1.15)
 SESSION_SECRET=...
 SONAR_DB_PASSWORD=...
 SONAR_PUBLIC_URL=https://portal.genegenius.ai/sonar
@@ -612,11 +663,12 @@ Open `http://<vm-ip>:7000` (portal) and `http://<vm-ip>:7010/sonar` (SonarQube).
 
 ### 3.3 First run
 
-1. Open `PUBLIC_URL` and **sign in with GitHub**.
-2. The first sync loads 90 days of history and builds the views. That takes a few minutes, plus a one-time install of the backend's requirements for the route export (about 10 minutes). Watch it under Settings → Recent jobs.
-3. **Settings → LLM:** choose the API type, base URL (blank for the provider's own API), key and model → **Test connection** → **Save**.
-4. **SonarQube:** open `/sonar`, log in as `admin` / `admin`, set a new password, then My Account → Security → **Generate token** (type *Global Analysis*) → paste it in Settings → Save. The next default-branch push (or Rebuild) scans both repos.
-5. Read a few reviews in the portal. When you trust them, turn on **Post reviews on GitHub PRs**.
+1. Open `PUBLIC_URL`, **Continue with GitHub**, and create a workspace (or open the invite link someone sent you).
+2. **Import** a repository. The first sync loads 90 days of history and writes the docs; watch it under Settings → Recent jobs. An upgraded install (1.15) also builds the views, which takes a few minutes plus a one-time install of the backend's requirements for the route export (about 10 minutes).
+3. **Settings → Team:** invite the people who should see it.
+4. **Settings → LLM:** choose the API type, base URL (blank for the provider's own API), key and model → **Test connection** → **Save**.
+5. **SonarQube** (upgraded installs): open `/sonar`, log in as `admin` / `admin`, set a new password, then My Account → Security → **Generate token** (type *Global Analysis*) → paste it in Settings → Save. The next default-branch push (or Rebuild) scans both repos.
+6. Read a few reviews in the portal. When you trust them, turn on **Post reviews on GitHub PRs**.
 
 ---
 
@@ -713,13 +765,13 @@ Set in `.env` (Docker) or the environment (local).
 | `PUBLIC_URL` | `http://localhost:7000` | The address people use; also the base for the OAuth callback and the links in PR reviews |
 | `DOMAIN` | | Certificate domain for the `https` profile |
 | `BIND_ADDR` | `0.0.0.0` | Interface for ports 7000/7010; `127.0.0.1` behind Caddy or nginx |
-| `GITHUB_ORG` | `GeneGeniusinc` | Org whose members may log in, and where the App is installed |
-| `BACKEND_REPO` / `FRONTEND_REPO` | `GeneGeniusinc/Genegenius-backend` / `GeneGeniusinc/Genegenius-phase-1` | The two repositories |
+| `GITHUB_ORG`, `BACKEND_REPO` / `FRONTEND_REPO`, `EXTRA_REPOS`, `MCP_TOKEN`, `ADMINS` | | Read once, to turn a single-tenant install into workspace 1 (1.15): its name, repositories, MCP token and owners |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | port `587` | Email for invites (587 STARTTLS, 465 TLS). Blank host: links are copied by hand |
+| `ALLOW_PRIVATE_LLM` | | `1` lets workspaces point their LLM at private addresses (one trusted team only) |
 | `GITHUB_APP_ID` | | App ID |
 | `GITHUB_APP_PRIVATE_KEY_FILE` | `/secrets/github-app.pem` in Docker | App private key file (or `GITHUB_APP_PRIVATE_KEY` with the PEM inline) |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | | The App's OAuth credentials, for "Sign in with GitHub" |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | | The App's OAuth credentials, for "Continue with GitHub" (required to sign in) |
 | `GITHUB_WEBHOOK_SECRET` | | Must match the App's webhook secret; webhooks are refused without it |
-| `ADMINS` | | Comma-separated GitHub logins who can change Settings |
 | `SESSION_SECRET` | random per start | Signs login cookies; set it, or everyone is logged out on restart |
 | `SONAR_DB_PASSWORD` | | Postgres password for SonarQube (required by compose) |
 | `SONAR_PUBLIC_URL` | | The SonarQube link shown on the Overview |
@@ -729,10 +781,9 @@ Set in `.env` (Docker) or the environment (local).
 | `BACKFILL_DAYS` | `90` | History loaded and kept for commits |
 | `DEFAULT_BRANCHES` | from GitHub | JSON override, e.g. `{"GeneGeniusinc/Genegenius-backend": "v2-accelerated"}` |
 | `GIT_URL_TEMPLATE` | `https://github.com/{repo}.git` | Where to clone from (`{repo}` = owner/name, `{name}` = name); local development can use folders |
-| `DATA_DIR` / `SITE_DIR` / `WORK_DIR` | `/data`, `/data/site`, `/data/work` | Storage locations |
-| `BACKEND_PYTHON` | venv in `/data/venvs/backend` | Interpreter with the backend's requirements, for the route export |
-| `GITHUB_TOKEN` | | Read-only token for the two repos ("GitHub access" in 3.2); enough for everything except GitHub login, webhooks and posting reviews |
-| `PORTAL_PASSWORD` / `ADMIN_PASSWORD` | generated by `install.sh` | Shared logins: viewer / admin (Settings) |
+| `DATA_DIR` | `/data` | Storage: `control.db` and `workspaces/<id>/` |
+| `BACKEND_PYTHON` | venv in the workspace's `venvs/backend` | Interpreter with the backend's requirements, for the route export |
+| `GITHUB_TOKEN` | | Without the App: one operator's token, used for every repository (local development) |
 | `COMPOSE_PROFILES` | `https` (set by `install.sh`) | Optional services to run: `https` (Caddy), `llm` (local model) |
 | `LLM_KIND`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_EFFORT` | Claude Opus 5.5, no key | Default LLM; Settings overrides it. `LOCAL_LLM` fills these for the local model |
 | `LLM_TIMEOUT` | `600` | Seconds per LLM request (`3600` for a local model) |
@@ -742,8 +793,6 @@ Set in `.env` (Docker) or the environment (local).
 | `CHAT_TIMEOUT` | `300` (`900` for a local model) | Seconds for a whole Ask answer, all its lookups included |
 | `LLM_PARALLEL` | `1` (`2` on 12 GB+ VMs) | Requests the local model serves at once; 2 keeps a slot free for Ask |
 | `DOCS_CONTEXT_CHARS` | `48000` | Code facts per documentation request (lower for a local model; `install.sh` sets it) |
-| `EXTRA_REPOS` | | More repositories to sync, review and document, comma separated (`owner/name`); admins can also add them in Settings |
-| `MCP_TOKEN` | generated by `install.sh` | Secret for the MCP server; blank turns `/mcp` off |
 | `OLLAMA_URL` / `OLLAMA_DIR` | `http://llm:11434` / the `ollama` volume | Where the portal looks for local models / a host model store to reuse |
 | `DEV_USER` | | Local development only: auto-login (see 1.11) |
 | `DISABLE_WORKER` | | `1` runs the web app without the worker and poller |
@@ -768,9 +817,10 @@ Set in `.env` (Docker) or the environment (local).
 
 | Symptom | Cause and fix |
 |---|---|
-| "No login method is configured" | Set `PORTAL_PASSWORD`/`ADMIN_PASSWORD` (re-run `install.sh`), or the GitHub App's client ID and secret |
-| Overview says "The last sync failed … repo is private" | No read access yet: add `GITHUB_TOKEN` (3.2 "GitHub access") |
-| "… is not a member of the GeneGeniusinc organisation" | The user isn't an org member, or the App lacks Organization → Members: Read |
+| "Sign-in needs the GitHub App" | Set the App's `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (3.1) |
+| Import says the App isn't installed, or you can't read the repository | Install the App on that account or repository (the button links there); private repositories also need your own access |
+| An invite link says it was used or expired | Links work once, for 7 days: invite again from Settings → Team |
+| Invites aren't emailed | `SMTP_HOST` is blank, or the error is shown under the invite form; the link shown there still works |
 | Webhooks show 401 in the App's "Recent deliveries" | `GITHUB_WEBHOOK_SECRET` differs from the App's webhook secret |
 | No pushes or CI on Activity | The App isn't installed on the repo, or lacks permissions; check Settings → status "GitHub App" |
 | API reference stale or missing | The route export failed (usually the backend venv install); the error is in Recent jobs |
@@ -787,18 +837,20 @@ Set in `.env` (Docker) or the environment (local).
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt pytest      # .venv/bin/pip on Linux/macOS
 npm ci
-.venv/Scripts/python -m pytest tests                       # 12 checks, including MCP, PR webhooks, generated docs,
-                                                           # and: webhook HMAC, diff parsing, finding
-                                                           # validation, chunking, breakage detection,
-                                                           # LLM tool formats, read-only SQL
+.venv/Scripts/python -m pytest tests                       # 16 checks, including workspaces, invites, roles and
+                                                           # isolation, import access, the single-tenant upgrade,
+                                                           # MCP, PR webhooks, generated docs, webhook HMAC, diff
+                                                           # parsing, breakage detection, read-only SQL
 ```
 
-Run the whole portal against local checkouts, without a GitHub App. You get commits, people, views, reviews and chat; pushes, CI results and logins need the App or `GITHUB_TOKEN`:
+Run the whole portal without a GitHub App: `DEV_USER` signs in requests from this machine, you create a workspace,
+and Import clones public repositories (or local folders through `GIT_URL_TEMPLATE`) with no access check. You get
+commits, people, docs, reviews and chat; pushes and CI results need the App or `GITHUB_TOKEN`:
 
 ```bash
 DATA_DIR=./data GIT_URL_TEMPLATE='D:/GeneGenius/{name}' \
 DEFAULT_BRANCHES='{"GeneGeniusinc/Genegenius-backend":"v2-accelerated","GeneGeniusinc/Genegenius-phase-1":"main"}' \
-BACKEND_PYTHON=<python with the backend requirements> DEV_USER=<your login> ADMINS=<your login> \
+BACKEND_PYTHON=<python with the backend requirements> DEV_USER=<your login> \
 .venv/Scripts/python -m uvicorn portal.main:app --port 7000
 ```
 
@@ -821,3 +873,8 @@ cd web && npm run dev                  # http://localhost:4321 with hot reload; 
 - The review bot can be wrong. It is a second pair of eyes, not a gate; it doesn't block merges.
 - Coverage from your CI isn't imported into SonarQube yet. Code churn (lines rewritten soon after being written) isn't measured yet.
 - Docker is deployed on the server; the image wasn't built on the development machine.
+- One worker thread runs every workspace's jobs in arrival order, so one team's big first sync delays the others'.
+  Per-workspace fairness (or more workers) is the next step when that hurts.
+- No quotas yet: workspaces per user, repositories per workspace and disk per workspace are unlimited. Removing a
+  repository keeps its history and clone; there is no purge or workspace deletion yet.
+- The same repository imported into two workspaces is cloned and fetched twice.

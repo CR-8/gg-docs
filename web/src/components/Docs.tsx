@@ -120,8 +120,13 @@ function Home({ repos, admin }: { repos: RepoDocs[]; admin: boolean }) {
           )
         })}
       </div>
+      {!repos.length && (
+        <Empty title="No repositories yet">
+          <a className="link" href="/new/">Import one</a> and its documentation is written right after the first sync.
+        </Empty>
+      )}
       <p className="text-muted-foreground text-xs">
-        Every repository the portal syncs gets its own set. Admins add repositories in <a className="link" href="/settings/">Settings</a>.
+        Every repository the portal syncs gets its own set. Admins <a className="link" href="/new/">import repositories</a>.
       </p>
     </div>
   )

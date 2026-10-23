@@ -2,12 +2,10 @@
 
 Streamable HTTP, stateless: each POST carries JSON-RPC and gets a plain JSON answer (the spec allows that instead of
 an SSE stream), so there are no sessions to keep. Read-only: the same tools as Ask (chat.py), with larger results.
-Auth is MCP_TOKEN, as `Authorization: Bearer <token>` or in the URL (/mcp/<token>) for clients that only take a URL.
+Auth is the workspace's MCP token, as `Authorization: Bearer <token>` or in the URL (/mcp/<token>) for clients that
+only take a URL; the token decides which workspace the agent sees.
 """
-from datetime import date
-
-from . import BACKEND_REPO, FRONTEND_REPO, db
-from .chat import SYSTEM, TOOLS, run_tool
+from .chat import run_tool, system, tools
 
 OLDEST = "2025-03-26"  # first version with Streamable HTTP
 LATEST = "2025-11-25"
@@ -33,17 +31,16 @@ def handle(msg):
             "protocolVersion": asked if asked >= OLDEST else LATEST,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": "genegenius-portal", "title": "GeneGenius engineering portal", "version": "1.0.0"},
-            "instructions": SYSTEM.format(backend=BACKEND_REPO, frontend=FRONTEND_REPO,
-                                          today=date.today().isoformat(), schema=db.schema_text()),
+            "instructions": system(),
         }
     elif method == "ping":
         result = {}
     elif method == "tools/list":
         result = {"tools": [{"name": t["name"], "description": t["description"], "inputSchema": t["parameters"],
-                             "annotations": {"readOnlyHint": True, "openWorldHint": False}} for t in TOOLS]}
+                             "annotations": {"readOnlyHint": True, "openWorldHint": False}} for t in tools()]}
     elif method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
-        if name not in {t["name"] for t in TOOLS}:
+        if name not in {t["name"] for t in tools()}:
             return error(mid, -32602, f"Unknown tool: {name}")
         out = run_tool(name, args if isinstance(args, dict) else {}, LIMIT)
         result = {"content": [{"type": "text", "text": out}], "isError": False}

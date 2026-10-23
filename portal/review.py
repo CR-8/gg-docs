@@ -19,11 +19,11 @@ MAX_CHARS = int(os.environ.get("REVIEW_MAX_CHARS") or 600_000)
 SEVERITIES = ("critical", "major", "minor", "nit")
 CATEGORIES = ("bug", "security", "perf", "test-gap", "slop")
 
-SYSTEM = """You review code changes for the GeneGenius team (a genomics platform: FastAPI backend, Next.js frontend).
+SYSTEM = """You review code changes for a software team.
 You get a unified diff in which every new-file line is prefixed with its line number. Report only real problems in
 added or changed lines (the ones marked +). Categories:
 - bug: incorrect behaviour, broken edge cases, wrong error handling, race conditions
-- security: injection, missing auth checks, secrets in code, unsafe deserialisation, exposure of genomic or personal data
+- security: injection, missing auth checks, secrets in code, unsafe deserialisation, exposure of personal data
 - perf: needless work on hot paths, N+1 queries, unbounded memory
 - test-gap: risky new logic with no test covering it
 - slop: code that works but should not be merged as is: dead or commented-out code, debug prints or console.log,

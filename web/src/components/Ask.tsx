@@ -13,7 +13,7 @@ const EXAMPLES = [
   "Who pushed to the default branches this week, and what?",
   "Whose push last broke CI, and is it fixed?",
   "Rank people by weighted review findings per 1k lines over 90 days",
-  "Which modules does the VMIS service depend on?",
+  "Which pull requests are open, and what did the review bot find?",
 ]
 const KEY = "portal-chat"
 
