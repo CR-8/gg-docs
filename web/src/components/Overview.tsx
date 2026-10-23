@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Status, StatusIndicator, StatusLabel } from "@/components/kibo-ui/status"
+import { Mermaid } from "@/components/ViewFrame"
 
 export const ICONS: Record<View, typeof Network> = {
   graph: Network, tree: FolderTree, callflow: Workflow, deps: GitFork, api: BookOpen, rules: ShieldCheck, report: FileText,
@@ -34,6 +35,13 @@ type DocSet = { repo: string; name: string; status: { state: string; done?: numb
 type PersonRow = { person: string; commits?: number; pushes?: number; open_breakages?: number; findings?: number }
 type ReviewRow = { id: number; created_at: string; findings: number; critical: number | null; major: number | null; slop: number | null }
 type Activity = { pushes: { pushed_at: string; broke: string[] }[]; commits: { committed_at: string }[] }
+type CodeComponent = { name: string; title: string; slug: string; files: number; lines: number; routes: number; used_by: number; deps: number }
+type Arch = {
+  repo: string; name: string; head: string; at: string; root: string; files: number; lines: number
+  languages: Record<string, number>; components: CodeComponent[]; edges: [string, string, number][]
+  routes: [string, string, string, string][]; integrations: Record<string, string[]>
+  diagrams: { components: string; flow: string; deploy: string }
+}
 
 const ACTIVITY_LIMIT = 500
 const STATUS_TONE: Record<string, "success" | "error" | "info"> = { active: "success", revoked: "error" }
@@ -462,6 +470,163 @@ function Documentation({ docs }: { docs?: DocSet[] }) {
   )
 }
 
+// ---------- architecture of every repository (docgen's snapshot, GET /api/architecture) ----------
+
+const LANG: Record<string, string> = {
+  python: "Python", ts: "TypeScript", js: "JavaScript", go: "Go", rust: "Rust", java: "Java", kotlin: "Kotlin",
+  ruby: "Ruby", php: "PHP", csharp: "C#",
+}
+const SHADE = ["bg-brand", "bg-foreground/45", "bg-foreground/25", "hatch bg-foreground/10", "bg-foreground/10"]
+const pct = (n: number, of: number) => `${of ? Math.round((n / of) * 100) : 0}%`
+
+function LargestComponents({ a }: { a: Arch }) {
+  const top = a.components.slice(0, 8)
+  const max = top[0]?.lines || 1
+  return (
+    <Section title="Largest components" description="Lines of code. Each opens its document.">
+      <ul className="space-y-2.5">
+        {top.map((c, i) => (
+          <li key={c.name}>
+            <a href={`/docs/#${a.name}/${c.slug}`} className="group block">
+              <span className="flex items-baseline justify-between gap-2 text-sm">
+                <span className="truncate group-hover:underline">{c.title}</span>
+                <span className="text-muted-foreground shrink-0 text-xs tabular-nums">{c.lines.toLocaleString()}</span>
+              </span>
+              <span className="bg-muted mt-1 block h-2 overflow-hidden rounded-full">
+                <span className={cn("block h-full rounded-full", i ? "hatch bg-foreground/10" : "bg-brand")}
+                  style={{ width: `${Math.max(3, (c.lines / max) * 100)}%` }} />
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  )
+}
+
+function MostUsed({ a }: { a: Arch }) {
+  const hubs = a.components.filter((c) => c.used_by).sort((x, y) => y.used_by - x.used_by).slice(0, 5)
+  return (
+    <Section title="Most depended on" description="Imported by the most other components.">
+      {hubs.length ? (
+        <ul className="-my-1 divide-y">
+          {hubs.map((c) => (
+            <li key={c.name} className="flex items-center gap-3 py-2 text-sm">
+              <a href={`/docs/#${a.name}/${c.slug}`} className="min-w-0 flex-1 truncate hover:underline">{c.title}</a>
+              <Tag>{c.used_by} use it</Tag>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="text-muted-foreground text-sm">No component imports another yet.</p>}
+    </Section>
+  )
+}
+
+function Stack({ a }: { a: Arch }) {
+  const langs = Object.entries(a.languages)
+  const kinds = Object.entries(a.integrations)
+  const shade = (i: number) => SHADE[Math.min(i, SHADE.length - 1)]
+  return (
+    <div className="grid gap-4 md:grid-cols-2 lg:gap-5">
+      <Section title="Languages" description="Share of the lines of code.">
+        <div className="bg-muted flex h-3 overflow-hidden rounded-full" role="img"
+          aria-label={langs.map(([l, n]) => `${LANG[l] ?? l} ${pct(n, a.lines)}`).join(", ")}>
+          {langs.map(([l, n], i) => <span key={l} className={shade(i)} style={{ width: pct(n, a.lines) }} />)}
+        </div>
+        <div className="text-muted-foreground mt-2.5 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          {langs.map(([l, n], i) => (
+            <span key={l} className="flex items-center gap-1.5">
+              <i className={cn("size-2 rounded-full ring-1 ring-foreground/15", shade(i))} />
+              {LANG[l] ?? l} <span className="tabular-nums">{pct(n, a.lines)}</span>
+            </span>
+          ))}
+        </div>
+      </Section>
+      <Section title="Integrations" description="Databases, queues, AI and other services the code uses.">
+        {kinds.length ? (
+          <dl className="space-y-2 text-sm">
+            {kinds.map(([k, pkgs]) => (
+              <div key={k} className="flex flex-wrap items-center gap-1.5">
+                <dt className="text-muted-foreground w-full text-xs sm:w-32">{k}</dt>
+                {pkgs.slice(0, 8).map((p) => <dd key={p}><Tag><code className="font-mono">{p}</code></Tag></dd>)}
+              </div>
+            ))}
+          </dl>
+        ) : <p className="text-muted-foreground text-sm">None detected.</p>}
+      </Section>
+    </div>
+  )
+}
+
+function CodeMap({ list }: { list?: Arch[] }) {
+  const [pick, setPick] = useState("")
+  const head = (extra?: ReactNode) => (
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h2 id="code-map" className="text-xl font-semibold tracking-tight">Architecture</h2>
+        <p className="text-muted-foreground mt-1 text-sm">How each repository is put together, read from its default branch after every push.</p>
+      </div>
+      {extra}
+    </div>
+  )
+  if (!list) return <section aria-labelledby="code-map" className="space-y-4 pt-2">{head()}<Loading rows={4} /></section>
+  if (!list.length)
+    return (
+      <section aria-labelledby="code-map" className="space-y-4 pt-2">
+        {head()}
+        <Section title="Not read yet">
+          <p className="text-muted-foreground text-sm text-pretty">
+            The component map, its charts and the request flow appear here once a repository is synced and read, a minute
+            or two after <a className="link" href="/new/">connecting one</a>. <a className="link" href="/settings/">Settings</a> → Recent jobs shows progress.
+          </p>
+        </Section>
+      </section>
+    )
+  const a = list.find((x) => x.repo === pick) ?? [...list].sort((x, y) => y.components.length - x.components.length)[0]
+  const views = ([["components", "Component map", a.diagrams.components], ["flow", "Requests to data", a.diagrams.flow],
+    ["deploy", "Deployment", a.diagrams.deploy]] as const).filter(([, , d]) => d)
+  return (
+    <section aria-labelledby="code-map" className="space-y-4 pt-2">
+      {head(
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted-foreground text-xs">at <code className="font-mono">{a.head.slice(0, 8)}</code>, <Time iso={a.at} /></span>
+          {list.length > 1 && <Choice label="Repository" value={a.repo} onChange={setPick} className="w-44" options={list.map((x) => [x.repo, x.name])} />}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Tile label="Files">{a.files.toLocaleString()}</Tile>
+        <Tile label="Lines of code">{a.lines.toLocaleString()}</Tile>
+        <Tile label="Components">{a.components.length}</Tile>
+        <Tile label="Routes and pages">{a.routes.length}</Tile>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-12 lg:gap-5">
+        <Tabs key={a.repo} defaultValue={views[0]?.[0]} className="lg:col-span-8 lg:self-start">
+          <Section
+            flush
+            title={a.name}
+            description={<>Arrows point from a component to what it imports{a.root && <> · source in <code className="font-mono">{a.root}/</code></>}</>}
+            action={<Button variant="ghost" size="icon-sm" asChild><a href={`/docs/#${a.name}/architecture`} aria-label="Architecture document"><ArrowUpRight /></a></Button>}
+          >
+            <div className="border-b px-4 py-2">
+              <TabsList>{views.map(([v, label]) => <TabsTrigger key={v} value={v}>{label}</TabsTrigger>)}</TabsList>
+            </div>
+            {views.map(([v, , d]) => (
+              <TabsContent key={v} value={v} className="h-[34rem] p-2">
+                <div className="bg-muted/40 size-full overflow-hidden rounded-xl"><Mermaid text={d} /></div>
+              </TabsContent>
+            ))}
+          </Section>
+        </Tabs>
+        <div className="grid content-start gap-4 lg:col-span-4 lg:gap-5">
+          <LargestComponents a={a} />
+          <MostUsed a={a} />
+        </div>
+      </div>
+      <Stack a={a} />
+    </section>
+  )
+}
+
 export function Overview() {
   const me = useMe()
   const s = useApi<Summary>("/api/summary").data
@@ -469,6 +634,7 @@ export function Overview() {
   const reviews = useApi<ReviewRow[]>("/api/reviews?limit=100").data
   const docs = useApi<DocSet[]>("/api/docs").data
   const links = useApi<{ repositories: RepoLink[] }>(me?.workspace ? `/api/v1/workspaces/${me.workspace.id}/repositories` : null).data
+  const arch = useApi<Arch[]>("/api/architecture").data
   const [data, setData] = useState<OverviewData | null | undefined>()
   useEffect(() => {
     fetch("/site/overview.json").then((r) => (r.ok ? r.json() : null)).then(setData, () => setData(null))
@@ -503,6 +669,9 @@ export function Overview() {
           <Spotlight data={data} summary={s} />
         </div>
         <ActivityPanel open={s.open_breakages} />
+      </div>
+      <CodeMap list={arch} />
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-12 lg:gap-5">
         <TeamSignals people={people} />
         <Documentation docs={docs} />
       </div>
@@ -511,7 +680,7 @@ export function Overview() {
         <section aria-labelledby="architecture" className="space-y-4 pt-4">
           <div className="flex flex-wrap items-end justify-between gap-2">
             <div>
-              <h2 id="architecture" className="text-xl font-semibold tracking-tight">Architecture</h2>
+              <h2 id="architecture" className="text-xl font-semibold tracking-tight">Backend and frontend views</h2>
               <p className="text-muted-foreground mt-1 text-sm">How the backend and frontend are organised, what CI says about each default branch, and every route.</p>
             </div>
             {data && <span className="text-muted-foreground text-xs">Views built <Time iso={data.built_at} /></span>}

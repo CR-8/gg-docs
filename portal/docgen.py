@@ -231,10 +231,19 @@ def analyze_js(path, text, paths, root):
 # ---------- the whole repository ----------
 
 def source_root(code_paths):
+    """Where the code lives: down through a folder holding nearly all of it (an app kept in my-app/), then into the
+    usual source folder (app/, src/, ...) when that has at least 5 files. `@/` imports resolve against it."""
+    base = ""
+    while True:
+        tops = Counter(p[len(base):].split("/")[0] for p in code_paths if p.startswith(base) and "/" in p[len(base):])
+        top, n = tops.most_common(1)[0] if tops else ("", 0)
+        if not top or top in ROOTS or n < 0.95 * len(code_paths):
+            break
+        base += top + "/"
     for r in ROOTS:
-        if sum(p.startswith(r + "/") for p in code_paths) >= 5:
-            return r
-    return ""
+        if sum(p.startswith(base + r + "/") for p in code_paths) >= 5:
+            return base + r
+    return base.rstrip("/")
 
 
 def plan_components(paths, root):
@@ -394,6 +403,24 @@ def diagram_deploy(a):
 
 def mermaid(text):
     return f"```mermaid\n{text}\n```" if text else ""
+
+
+def snapshot(a, head):
+    """What Overview charts for a repository (GET /api/architecture): the facts its docs are written from, small
+    enough to send whole, refreshed on every docs run."""
+    langs, kinds = Counter(), defaultdict(list)
+    for f in a["files"].values():
+        langs[f["lang"]] += f["lines"]
+    for e, _n in a["externals"].most_common():
+        if k := kind_of(e):
+            kinds[k].append(e)
+    comps = [{"name": c, "title": i["title"], "slug": i["slug"], "files": len(i["files"]), "lines": i["lines"],
+              "routes": len(i["routes"]), "used_by": len(i["used_by"]), "deps": len(i["deps"])} for c, i in a["components"].items()]
+    return {"head": head, "at": now(), "root": a["root"], "files": len(a["files"]), "lines": sum(langs.values()),
+            "languages": dict(langs.most_common()), "components": sorted(comps, key=lambda c: -c["lines"]),
+            "edges": a["edges"][:300], "routes": a["routes"][:500], "integrations": dict(kinds), "env": len(a["env"]),
+            "diagrams": {"components": diagram_components(a), "flow": diagram_flow(a) if a["routes"] else "",
+                         "deploy": diagram_deploy(a)}}
 
 
 # ---------- reference sections (always there, no LLM needed) ----------
@@ -600,11 +627,13 @@ def save(repo, d, content, summary, model, status, fp, head):
 def run(repo, only=None, force=False):
     head = git(repo, "rev-parse", f"origin/{default_branch(repo)}").strip()
     with_llm = llm.configured()
-    if not (only or force) and db.setting(f"docs_done:{repo}") == [head, with_llm, DOC_VERSION]:
+    fresh = (db.setting(f"architecture:{repo}") or {}).get("head") == head
+    if not (only or force) and fresh and db.setting(f"docs_done:{repo}") == [head, with_llm, DOC_VERSION]:
         return  # nothing new since the last complete run
     key = WORKSPACE.get(), repo
     STATUS[key] = {"state": "reading the code", "done": 0, "total": 0, "current": None, "head": head}
     a = analyze(repo)
+    db.set_setting(f"architecture:{repo}", snapshot(a, head))
     docs = plan(a)
     known = {r["slug"]: r["inputs"] for r in db.docs.find({"repo": repo}, fields=["slug", "inputs"])}
     todo = [(d, fp) for d in docs if (not only or d["slug"] == only)

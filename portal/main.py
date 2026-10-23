@@ -921,6 +921,13 @@ def docs_index():
              "docs": ordered(db.docs.find({"repo": r}, fields=DOC_FIELDS))} for r in db.repos()]
 
 
+@app.get("/api/architecture")
+def architecture():
+    """Per repository, the code facts its docs were written from (docgen.snapshot), for Overview's charts. A repository
+    whose first docs run hasn't happened yet is left out."""
+    return [{"repo": r, "name": r.split("/")[1], **s} for r in db.repos() if (s := db.setting(f"architecture:{r}"))]
+
+
 @app.get("/api/docs/search")
 def docs_search(q: str = ""):
     return docgen.search(q)

@@ -368,6 +368,13 @@ def test_generated_docs_follow_the_code():
     slugs = {r["slug"] for r in db.docs.find({"repo": repo}, fields=["slug"])}
     assert {"overview", "architecture", "data-flow", "system-design", "api", "modules/api", "modules/services"} <= slugs
     assert "```mermaid" in db.docs.one({"repo": repo, "slug": "architecture"})["content"]
+    arch = db.setting(f"architecture:{repo}")  # what Overview charts, saved by the same run
+    assert arch["root"] == "app" and {c["name"] for c in arch["components"]} == {"api", "services", "core", "(root)"}
+    assert ["api", "services", 1] in arch["edges"] and arch["languages"] == {"python": arch["lines"]}
+    assert arch["diagrams"]["components"].startswith("flowchart") and "Database" in arch["integrations"]
+    # an app kept in one folder (my-app/src) is stepped into, so @/ imports resolve; a real monorepo is not
+    assert docgen.source_root([f"my-app/src/lib/f{i}.ts" for i in range(40)] + ["my-app/proxy.ts", "scripts/x.ts"]) == "my-app/src"
+    assert docgen.source_root([f"web/src/c{i}.ts" for i in range(85)] + [f"api/m{i}.py" for i in range(15)]) == ""
     versions = lambda: db.doc_versions.count({"repo": repo})
     before = versions()
 
@@ -389,6 +396,8 @@ def test_generated_docs_follow_the_code():
         assert c.get("/api/docs/tiny/modules/services?download=1").headers["content-disposition"].endswith('services.md"')
         assert c.get("/api/docs/tiny/zip").content[:2] == b"PK"
         assert [d["kind"] for d in c.get("/api/docs").json()[-1]["docs"][:2]] == ["overview", "architecture"]
+        tiny = next(a for a in c.get("/api/architecture").json() if a["repo"] == repo)
+        assert tiny["name"] == "tiny" and tiny["files"] == 11 and tiny["routes"][0][:2] == ["GET", "/v1/sum"]
 
     # Once a model is set, every document is rewritten with its prose on top of the reference.
     saved = docgen.llm.configured, docgen.write_prose

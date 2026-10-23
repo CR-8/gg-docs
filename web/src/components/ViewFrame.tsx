@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { ArrowUpRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { SIDES, VIEWS, viewsFor, type Side, type View } from "@/lib/views"
@@ -27,8 +27,10 @@ function LinkTabs({ items }: { items: { href: string; label: string; on: boolean
   )
 }
 
-function Mermaid({ text }: { text: string }) {
+/** A Mermaid diagram that fills its box, fitted, with wheel-zoom and drag-pan. */
+export function Mermaid({ text }: { text: string }) {
   const ref = useRef<HTMLDivElement>(null)
+  const id = "mmd" + useId().replace(/[^a-zA-Z0-9]/g, "") // one render id per diagram, so several fit on a page
   useEffect(() => {
     let live = true
     ;(async () => {
@@ -37,7 +39,7 @@ function Mermaid({ text }: { text: string }) {
         startOnLoad: false, maxEdges: 20000, maxTextSize: 10_000_000, flowchart: { useMaxWidth: false },
         theme: document.documentElement.classList.contains("dark") ? "dark" : "default",
       })
-      const { svg } = await mermaid.render("import-map", text)
+      const { svg } = await mermaid.render(id, text)
       if (!live || !ref.current) return
       ref.current.innerHTML = svg // mermaid sanitises labels (securityLevel "strict")
       const el = ref.current.querySelector("svg")!
@@ -45,7 +47,12 @@ function Mermaid({ text }: { text: string }) {
       el.removeAttribute("height")
       el.style.cssText = "width:100%;height:100%;max-width:none"
       // diagrams come out thousands of px wide: fit, then wheel-zoom and drag-pan
-      svgPanZoom(el, { controlIconsEnabled: true, fit: true, center: true, minZoom: 0.05, maxZoom: 40, zoomScaleSensitivity: 0.3 })
+      const pz = svgPanZoom(el, { controlIconsEnabled: true, fit: true, center: true, minZoom: 0.05, maxZoom: 40, zoomScaleSensitivity: 0.3 })
+      const scale = pz.getSizes().realZoom
+      if (scale > 1) { // a small diagram: shown at its own size, not blown up to fill the box
+        pz.zoomBy(1 / scale)
+        pz.center()
+      }
     })()
     return () => {
       live = false
