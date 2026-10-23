@@ -1,4 +1,4 @@
-// dependency-cruiser rules for the frontend; build.py runs it from Genegenius-phase-1/.
+// dependency-cruiser rules for the frontend; build.py runs it from the frontend checkout.
 // Next.js picks these files up by name, so nothing imports them. (No nested quantifiers: depcruise rejects unsafe regexes.)
 const NEXT_ENTRY = "(^|/)(page|layout|route|loading|error|not-found|template|default|global-error)\\.[jt]sx?$";
 

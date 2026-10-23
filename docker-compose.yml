@@ -1,4 +1,4 @@
-# GeneGenius portal on :7000 (with its MongoDB) and SonarQube on :7010/sonar.    docker compose up -d --build
+# gg portal on :7000 (with its MongoDB) and SonarQube on :7010/sonar.    docker compose up -d --build
 # Optional parts are profiles, switched on with COMPOSE_PROFILES in .env (install.sh sets it):
 #   https - Caddy serves https://DOMAIN and https://DOMAIN/sonar with an automatic certificate
 #   llm   - a local coder model (Ollama) the portal uses for reviews and the chatbot

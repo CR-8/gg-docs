@@ -711,16 +711,16 @@ def test_single_tenant_install_becomes_a_workspace(tmp_path, monkeypatch):
     old.execute("INSERT INTO commits(repo, sha) VALUES('acme/extra', 'abc')")
     old.commit()
     old.close()
-    (tmp_path / "repos" / "Genegenius-backend").mkdir(parents=True)
+    (tmp_path / "repos" / "backend").mkdir(parents=True)
     assert migrate.main(["--apply"]) == 0
     assert migrate.main(["--apply"]) == 0  # and again: the same workspace, nothing more
     (w,) = db.workspaces.find({"migrated_from": "single-tenant"})
     ws = w["_id"]
-    assert w["name"] == "GeneGeniusinc" and db.members.find_one({"workspace_id": ws})["login"] == "lead"
-    assert (tmp_path / "portal.db").exists() and (tmp_path / f"workspaces/{ws}/repos/Genegenius-backend").is_dir()
+    assert w["name"] == "your-org" and db.members.find_one({"workspace_id": ws})["login"] == "lead"
+    assert (tmp_path / "portal.db").exists() and (tmp_path / f"workspaces/{ws}/repos/backend").is_dir()
     with workspace(ws):
-        assert db.repos() == ["GeneGeniusinc/Genegenius-backend", "GeneGeniusinc/Genegenius-phase-1", "acme/extra"]
+        assert db.repos() == ["your-org/backend", "your-org/frontend", "acme/extra"]
         assert db.commits.find(fields=["sha"]) == [{"sha": "abc"}]
-        assert db.setting("views") == {"backend": "GeneGeniusinc/Genegenius-backend",
-                                       "frontend": "GeneGeniusinc/Genegenius-phase-1"}
+        assert db.setting("views") == {"backend": "your-org/backend",
+                                       "frontend": "your-org/frontend"}
     db.migrations.delete_many({})

@@ -1,4 +1,4 @@
-# GeneGenius portal: FastAPI app + sync worker, with git, Node (dependency-cruiser) and sonar-scanner.
+# gg portal: FastAPI app + sync worker, with git, Node (dependency-cruiser) and sonar-scanner.
 FROM node:22-bookworm-slim AS node
 
 # The web frontend (Astro + shadcn/ui), built to static files the portal serves

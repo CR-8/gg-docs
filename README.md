@@ -1,6 +1,6 @@
-# GeneGenius engineering portal
+# gg engineering portal
 
-A self-hosted dashboard that stays in sync with the GeneGenius GitHub repositories and answers questions about them:
+A self-hosted dashboard that stays in sync with your team's GitHub repositories and answers questions about them:
 
 | You want to know | Where |
 |---|---|
@@ -30,7 +30,7 @@ Tests stay in your CI. The portal reads the CI results (GitHub check runs) and n
 1. [How it works](#1-how-it-works)
 2. [Using the portal](#2-using-the-portal)
 3. [Setting it up](#3-setting-it-up)
-4. [Integrating it into the Genegenius-backend repository](#4-integrating-it-into-the-genegenius-backend-repository)
+4. [Integrating it into the backend repository](#4-integrating-it-into-the-backend-repository)
 5. [Configuration reference](#5-configuration-reference)
 6. [Operating it](#6-operating-it)
 7. [Local development](#7-local-development)
@@ -47,7 +47,7 @@ Tests stay in your CI. The portal reads the CI results (GitHub check runs) and n
  GitHub ─────────────────────────────────────────────────────────────┐
    ▲   ▲  REST API (installation token): commits, events, check runs │
    │   └──────────────────────────────────────────────┐               ▼
-   │ PR reviews as genegenius-reviewer[bot]   ┌────────┴──────────────────────────────┐
+   │ PR reviews as gg-reviewer[bot]           ┌────────┴──────────────────────────────┐
    └──────────────────────────────────────────┤ portal container (:7000)              │
                                               │  FastAPI app ── pages + JSON API      │
  Browser ── "Sign in with GitHub" ──────────▶ │  worker thread ── job queue           │
@@ -384,8 +384,8 @@ breakages, people, SonarQube, the code graph, and the generated documentation. I
   (the old one stops at once) or turn it off in Settings. Access tokens are never accepted in the URL.
 - **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
   ```bash
-  claude mcp add --transport http genegenius https://<domain>/mcp --header "Authorization: Bearer <token>"
-  codex mcp add genegenius --url https://<domain>/mcp/<token>
+  claude mcp add --transport http gg https://<domain>/mcp --header "Authorization: Bearer <token>"
+  codex mcp add gg --url https://<domain>/mcp/<token>
   ```
 
 ### 1.15 Workspaces, teams and importing repositories
@@ -534,11 +534,11 @@ the portal shows none.
 
 ### 3.1 Create the GitHub App (once, by an org owner)
 
-GitHub → **GeneGeniusinc** → Settings → Developer settings → GitHub Apps → **New GitHub App**:
+GitHub → **your-org** → Settings → Developer settings → GitHub Apps → **New GitHub App**:
 
 | Field | Value |
 |---|---|
-| Name | `genegenius-reviewer` (comments appear as `genegenius-reviewer[bot]`) |
+| Name | `gg-reviewer` (comments appear as `gg-reviewer[bot]`) |
 | Homepage URL | your `PUBLIC_URL` |
 | Callback URL | `PUBLIC_URL/auth/callback` (the only one; sign-in uses PKCE and asks for no OAuth scopes) |
 | Webhook → Active, URL | `PUBLIC_URL/webhook/github` |
@@ -553,7 +553,7 @@ Then, on the app's page:
 
 1. Copy the **App ID** and **Client ID**, and **generate a client secret**.
 2. **Generate a private key**; save the downloaded `.pem` as `secrets/github-app.pem` next to `docker-compose.yml`.
-3. **Install App** → GeneGeniusinc → *Only select repositories* → `Genegenius-backend` and `Genegenius-phase-1`.
+3. **Install App** → your-org → *Only select repositories* → `backend` and `frontend`.
 
 "Pull requests: write" is only used to post reviews, and only when an admin turns that on. Why each permission:
 Contents (clone and read code), Metadata (repository details), Checks (CI results for breakages), Pull requests (PRs to
@@ -640,7 +640,7 @@ Settings can override all of this at any time. Pointing it at a hosted model (Cl
    rm ~/gg-portal/app.pem      # the script copied it into secrets/
    ```
 
-Keep the VM's public IP **static** (an Elastic IP on AWS, or "reserve static address" on GCP). If it changes, the sslip.io name changes with it; re-run the script and update the App's URLs. To use a real domain instead, point it at the VM and run `DOMAIN=portal.genegenius.ai bash install.sh <ip>`.
+Keep the VM's public IP **static** (an Elastic IP on AWS, or "reserve static address" on GCP). If it changes, the sslip.io name changes with it; re-run the script and update the App's URLs. To use a real domain instead, point it at the VM and run `DOMAIN=portal.example.com bash install.sh <ip>`.
 
 The manual steps below do the same thing by hand.
 
@@ -651,8 +651,8 @@ Works on any Linux VM; the commands below are for **Ubuntu 24.04 LTS**. Size: **
 **1. Create the VM, network and DNS**
 
 - Inbound firewall / security group: **22** (SSH, your IP only), **80** and **443** (everyone, for HTTPS and GitHub webhooks). Don't open 7000 or 7010.
-- Give the VM a fixed public IP (an Elastic IP on AWS) and create a DNS **A record**, e.g. `portal.genegenius.ai` → that IP.
-- Create the GitHub App (3.1) with `https://portal.genegenius.ai` as the base of its callback and webhook URLs.
+- Give the VM a fixed public IP (an Elastic IP on AWS) and create a DNS **A record**, e.g. `portal.example.com` → that IP.
+- Create the GitHub App (3.1) with `https://portal.example.com` as the base of its callback and webhook URLs.
 
 **2. Install Docker** (SSH in as `ubuntu`)
 
@@ -694,7 +694,7 @@ git config core.sshCommand 'ssh -i ~/.ssh/gg-docs'   # so later `git pull` uses 
 ```bash
 mkdir -p secrets && chmod 700 secrets
 # from your own machine, copy the GitHub App private key up:
-#   scp genegenius-reviewer.*.private-key.pem ubuntu@<vm-ip>:~/gg-portal/secrets/github-app.pem
+#   scp gg-reviewer.*.private-key.pem ubuntu@<vm-ip>:~/gg-portal/secrets/github-app.pem
 chmod 600 secrets/github-app.pem
 cp .env.example .env
 openssl rand -hex 32    # paste as SESSION_SECRET
@@ -705,8 +705,8 @@ nano .env
 Fill in at least:
 
 ```ini
-PUBLIC_URL=https://portal.genegenius.ai
-DOMAIN=portal.genegenius.ai
+PUBLIC_URL=https://portal.example.com
+DOMAIN=portal.example.com
 BIND_ADDR=127.0.0.1
 GITHUB_APP_ID=...
 GITHUB_CLIENT_ID=...
@@ -715,7 +715,7 @@ GITHUB_WEBHOOK_SECRET=...          # same value as in the GitHub App
 ADMINS=your-github-login          # upgrading a single-tenant install only: owners of its workspace (1.15)
 SESSION_SECRET=...
 SONAR_DB_PASSWORD=...
-SONAR_PUBLIC_URL=https://portal.genegenius.ai/sonar
+SONAR_PUBLIC_URL=https://portal.example.com/sonar
 ```
 
 The portal container runs as user id 1000, which is the default `ubuntu` user on most images. If its log shows "Permission denied" for the key, run `sudo chown 1000 secrets/github-app.pem`.
@@ -732,7 +732,7 @@ Caddy gets a Let's Encrypt certificate for `DOMAIN` on first start (DNS must alr
 
 **7. Check it**
 
-- `https://portal.genegenius.ai` → **Sign in with GitHub**.
+- `https://portal.example.com` → **Sign in with GitHub**.
 - GitHub App → Advanced → **Recent deliveries**: the ping and later pushes show `200`.
 - Settings → Recent jobs: `sync` entries, then `rebuild` after the first build.
 
@@ -801,23 +801,23 @@ Open `http://<vm-ip>:7000` (portal) and `http://<vm-ip>:7010/sonar` (SonarQube).
 
 ---
 
-## 4. Integrating it into the Genegenius-backend repository
+## 4. Integrating it into the backend repository
 
 The portal doesn't need to live anywhere special: it clones both repositories from GitHub through the App wherever it runs. What changes is where the **code** lives and how it is **deployed**.
 
 ### Recommended: a subfolder of the backend repo, run as its own service
 
-The code lives in `Genegenius-backend/tools/portal/`, versioned and reviewed like the rest of the backend, while it runs in its own containers next to (not inside) the API.
+The code lives in `backend/tools/portal/`, versioned and reviewed like the rest of the backend, while it runs in its own containers next to (not inside) the API.
 
 1. **Branch** from the default branch:
    ```bash
-   cd Genegenius-backend
+   cd backend
    git switch v2-accelerated && git pull
    git switch -c feat/engineering-portal
    ```
 2. **Copy the portal in**, without local state (Windows PowerShell shown; `rsync -a --exclude …` on Linux/macOS):
    ```powershell
-   robocopy D:\GeneGenius\arch-portal D:\GeneGenius\Genegenius-backend\tools\portal /E /XD data site work .venv node_modules __pycache__ .pytest_cache secrets /XF .env *.log
+   robocopy D:\src\gg-portal D:\src\backend\tools\portal /E /XD data site work .venv node_modules __pycache__ .pytest_cache secrets /XF .env *.log
    ```
    The folder brings its own `.gitignore`, so its `data/`, `.env`, `secrets/`, `.venv/` and `node_modules/` stay out of git.
 3. **Nothing else in the backend changes.**
@@ -842,22 +842,22 @@ The code lives in `Genegenius-backend/tools/portal/`, versioned and reviewed lik
          - uses: actions/setup-python@v5
            with: {python-version: "3.11"}
          - run: pip install -r requirements.txt pytest && python -m pytest tests
-         - run: docker build -t genegenius-portal .
+         - run: docker build -t gg-portal .
    ```
-   To publish the image to ECR like the backend does, copy the login and push steps from `ecr-build.yml`. You'll need a new ECR repository (for example `genegenius-portal`), and the `GitHubActions-ECRBuild` role's trust policy must allow this workflow.
+   To publish the image to ECR like the backend does, copy the login and push steps from `ecr-build.yml`. You'll need a new ECR repository (for example `gg-portal`), and the `GitHubActions-ECRBuild` role's trust policy must allow this workflow.
 5. **Deploy** on the portal server:
    ```bash
-   git clone https://github.com/GeneGeniusinc/Genegenius-backend.git && cd Genegenius-backend/tools/portal
+   git clone https://github.com/your-org/backend.git && cd backend/tools/portal
    cp .env.example .env && mkdir secrets   # fill in .env, add secrets/github-app.pem
    docker compose --profile https up -d --build
    ```
    Updating: `git pull && docker compose up -d --build` in that folder.
-6. **Behind your existing nginx** instead of Caddy (if it runs on the same host as `api.genegenius.ai`): leave out `--profile https`, set `BIND_ADDR=127.0.0.1`, and add a server block (certificate via certbot as for the API):
+6. **Behind your existing nginx** instead of Caddy (if it runs on the same host as `api.example.com`): leave out `--profile https`, set `BIND_ADDR=127.0.0.1`, and add a server block (certificate via certbot as for the API):
    ```nginx
    server {
        listen 443 ssl;
-       server_name portal.genegenius.ai;
-       # ssl_certificate ... (same as the api.genegenius.ai block)
+       server_name portal.example.com;
+       # ssl_certificate ... (same as the api.example.com block)
        client_max_body_size 10m;
        location /sonar { proxy_pass http://127.0.0.1:7010; proxy_set_header Host $host; }
        location / {
@@ -911,7 +911,7 @@ Set in `.env` (Docker) or the environment (local).
 | `SONAR_TOKEN` | | Alternative to the token in Settings |
 | `POLL_SECONDS` | `300` | Poll interval (backup to webhooks) |
 | `BACKFILL_DAYS` | `90` | History loaded and kept for commits |
-| `DEFAULT_BRANCHES` | from GitHub | JSON override, e.g. `{"GeneGeniusinc/Genegenius-backend": "v2-accelerated"}` |
+| `DEFAULT_BRANCHES` | from GitHub | JSON override, e.g. `{"your-org/backend": "v2-accelerated"}` |
 | `GIT_URL_TEMPLATE` | `https://github.com/{repo}.git` | Where to clone from (`{repo}` = owner/name, `{name}` = name); local development can use folders |
 | `DATA_DIR` | `/data` | Storage: `workspaces/<id>/` (clones, views), the key file, migration reports; the old SQLite files until you remove them |
 | `BACKEND_PYTHON` | venv in the workspace's `venvs/backend` | Interpreter with the backend's requirements, for the route export |
@@ -1017,8 +1017,8 @@ and Import clones public repositories (or local folders through `GIT_URL_TEMPLAT
 commits, people, docs, reviews and chat; pushes and CI results need the App or `GITHUB_TOKEN`:
 
 ```bash
-DATA_DIR=./data GIT_URL_TEMPLATE='D:/GeneGenius/{name}' \
-DEFAULT_BRANCHES='{"GeneGeniusinc/Genegenius-backend":"v2-accelerated","GeneGeniusinc/Genegenius-phase-1":"main"}' \
+DATA_DIR=./data GIT_URL_TEMPLATE='D:/src/{name}' \
+DEFAULT_BRANCHES='{"your-org/backend":"v2-accelerated","your-org/frontend":"main"}' \
 BACKEND_PYTHON=<python with the backend requirements> DEV_USER=<your login> \
 .venv/Scripts/python -m uvicorn portal.main:app --port 7000
 ```
@@ -1030,7 +1030,7 @@ cd web && npm ci && npm run build      # writes web/dist, which the portal serve
 cd web && npm run dev                  # http://localhost:4321 with hot reload; proxies /api, /auth, /site to :7000
 ```
 
-`python build.py` on its own regenerates the views from `../Genegenius-backend` and `../Genegenius-phase-1` (or `BACKEND_DIR`/`FRONTEND_DIR`) into `./site`. Serve that folder with any static server.
+`python build.py` on its own regenerates the views from `../backend` and `../frontend` (or `BACKEND_DIR`/`FRONTEND_DIR`) into `./site`. Serve that folder with any static server.
 
 ---
 

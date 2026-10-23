@@ -1,4 +1,4 @@
-"""Regenerate the GeneGenius architecture views into SITE_DIR (default ./site).
+"""Regenerate the architecture views into SITE_DIR (default ./site).
 
     python build.py                  # graphs routes deps index
     python build.py graphs deps      # only some: graphs routes deps sonar index
@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent
 # Absolute, because the tools below run with other working directories.
 SITE = Path(os.environ.get("SITE_DIR", ROOT / "site")).resolve()
 WORK = Path(os.environ.get("WORK_DIR", ROOT / "work")).resolve()
-BACKEND = Path(os.environ.get("BACKEND_DIR", ROOT.parent / "Genegenius-backend")).resolve()
-FRONTEND = Path(os.environ.get("FRONTEND_DIR", ROOT.parent / "Genegenius-phase-1")).resolve()
+BACKEND = Path(os.environ.get("BACKEND_DIR", ROOT.parent / "backend")).resolve()
+FRONTEND = Path(os.environ.get("FRONTEND_DIR", ROOT.parent / "frontend")).resolve()
 WIN = os.name == "nt"
 _beside = Path(sys.executable).with_name("graphify.exe" if WIN else "graphify")  # same env as this Python, not
 GRAPHIFY = os.environ.get("GRAPHIFY_BIN") or (str(_beside) if _beside.exists() else shutil.which("graphify"))  # a stale PATH copy
@@ -215,8 +215,8 @@ def step_sonar():
         return
     host = os.environ.get("SONAR_HOST_URL", "http://localhost:7010")
     for key, repo, props in (
-        ("genegenius-backend", BACKEND, ["-Dsonar.sources=app", "-Dsonar.tests=tests", "-Dsonar.python.version=3.11"]),
-        ("genegenius-frontend", FRONTEND, ["-Dsonar.sources=src", "-Dsonar.tests=src",
+        ("gg-backend", BACKEND, ["-Dsonar.sources=app", "-Dsonar.tests=tests", "-Dsonar.python.version=3.11"]),
+        ("gg-frontend", FRONTEND, ["-Dsonar.sources=src", "-Dsonar.tests=src",
                                             "-Dsonar.exclusions=**/*.test.*", "-Dsonar.test.inclusions=**/*.test.*"]),
     ):
         run([scanner, f"-Dsonar.host.url={host}", f"-Dsonar.projectKey={key}", f"-Dsonar.projectBaseDir={repo}",
@@ -276,7 +276,7 @@ def write_markdown():
     dc = WORK / "frontend-deps.json"
     violations = json.loads(dc.read_text(encoding="utf-8"))["summary"]["violations"] if dc.exists() else None
 
-    md = ["# GeneGenius architecture", "",
+    md = ["# Architecture", "",
           f"Generated {datetime.now():%Y-%m-%d %H:%M} from backend `{git_ref(BACKEND)}` and frontend `{git_ref(FRONTEND)}` "
           "by `build.py`. The portal has the interactive version, plus activity, people, CI breakages and reviews.", "",
           "| | Backend (FastAPI, `app/`) | Frontend (Next.js, `src/`) |", "|---|---|---|",

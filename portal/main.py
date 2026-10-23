@@ -65,7 +65,7 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title="GeneGenius portal", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app = FastAPI(title="gg portal", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 
 def current_user(request):

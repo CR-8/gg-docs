@@ -31,7 +31,7 @@ def handle(msg):
             # client's own version is echoed; pin a list here if a future version changes tools/list or tools/call.
             "protocolVersion": asked if asked >= OLDEST else LATEST,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "genegenius-portal", "title": "GeneGenius engineering portal", "version": "1.0.0"},
+            "serverInfo": {"name": "gg-portal", "title": "gg engineering portal", "version": "1.0.0"},
             "instructions": system(),
         }
     elif method == "ping":
