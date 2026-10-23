@@ -159,7 +159,15 @@ GG-Ops (the `chore/optimization-pass` branch of GG-ops) runs as one more contain
 `https://ggops.<ip-with-dashes>.sslip.io`. sslip.io resolves any name in front of the IP, so the stack's Caddy gets
 a second certificate and sends that name to GG-Ops; gg-docs stays at `https://<ip-with-dashes>.sslip.io`.
 
-**1. Get the code onto the VM.** The GG-ops repository is private, so copy the branch up as a bundle:
+**1. Get the code onto the VM.** The branch has the Dockerfile (`my-app/Dockerfile`). The repository is private, so
+either clone it with an account or deploy key that can read it:
+
+```bash
+# on the VM
+git clone -b chore/optimization-pass https://github.com/Ghostfreak-cypher/GG-ops.git ~/GG-ops
+```
+
+or copy the branch up from your machine as a bundle:
 
 ```bash
 # on your machine
@@ -171,15 +179,13 @@ cd "/d/Pratyush Tiwari/GG-ops" && git bundle create ~/ggops.bundle chore/optimiz
 git clone -b chore/optimization-pass ~/ggops.bundle ~/GG-ops
 ```
 
-A VM with read access to the repository can clone the branch from GitHub instead, once the branch there has the
-Dockerfile (`my-app/Dockerfile`).
-
 **2. Its settings.** Put GG-Ops's production settings (the ones it has on Vercel today) in
 `~/GG-ops/my-app/.env.production`, starting from `my-app/.env.example`. GG-Ops checks them when it starts:
 `MONGODB_URI`, `AUTH_SECRET`, the Google sign-in pair, `CRON_SECRET`, all six Pusher values, Upstash Redis, an upload
 provider and email must all be there. For this server:
 
 - `APP_URL=https://ggops.<ip-with-dashes>.sslip.io`
+- `GGDOCS_URL=https://<ip-with-dashes>.sslip.io` (shows "Open in GG-Docs" in GG-Ops's sidebar)
 - In Google Cloud → APIs & Services → Credentials, add
   `https://ggops.<ip-with-dashes>.sslip.io/api/auth/callback/google` to the OAuth client's redirect URIs.
 - Keep `MONGODB_URI` on Atlas: GG-Ops uses transactions, which need a replica set, and this stack's MongoDB is a
@@ -204,7 +210,7 @@ curl -s -X POST https://ggops.<ip-with-dashes>.sslip.io/oauth/register -H 'conte
 Put the `client_id` it returns in `~/gg-portal/.env` as `GGOPS_CLIENT_ID=...`, then
 `cd ~/gg-portal && docker compose up -d`.
 
-**Updating GG-Ops:** make a new bundle, `scp` it over `~/ggops.bundle`, and re-run `install.sh`. A changed Pusher key
+**Updating GG-Ops:** re-run `install.sh`: it pulls the branch (with a bundle, `scp` a new one over `~/ggops.bundle` first). A changed Pusher key
 needs that rebuild too, since the browser code has it built in.
 
 **Turning it off:** delete `GGOPS_DIR` and `GGOPS_DOMAIN` from `~/gg-portal/.env`, take `ggops` out of
