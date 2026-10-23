@@ -136,12 +136,14 @@ if [ -z "$LLM_TAG" ] && [[ "$(getkv COMPOSE_PROFILES)" == *llm* ]]; then LLM_TAG
 # GG-Ops: once given, GGOPS_DIR stays in .env, so later runs keep (and update) it
 if [ -n "${GGOPS_DIR:-}" ]; then
   [ -d "${GGOPS_DIR/#\~/$HOME}" ] || { echo "GGOPS_DIR: no folder at $GGOPS_DIR" >&2; exit 1; }
-  setkv GGOPS_DIR "$(cd "${GGOPS_DIR/#\~/$HOME}" && pwd)"
+  GGOPS_DIR="$(cd "${GGOPS_DIR/#\~/$HOME}" && pwd)"
+else
+  GGOPS_DIR="$(getkv GGOPS_DIR)"
 fi
-GGOPS_DIR="$(getkv GGOPS_DIR)"
 if [ -n "$GGOPS_DIR" ]; then
   ggenv="$GGOPS_DIR/my-app/.env.production"
   [ -f "$ggenv" ] || { echo "GG-Ops: put its settings in $ggenv first (start from my-app/.env.example)" >&2; exit 1; }
+  setkv GGOPS_DIR "$GGOPS_DIR"                                       # saved only once its settings are there
   if [ -d "$GGOPS_DIR/.git" ]; then git -C "$GGOPS_DIR" pull --ff-only || echo "(GG-Ops not updated: local changes or diverged history)"; fi
   setkv GGOPS_DOMAIN "ggops.$DOMAIN"
   setkv GGOPS_URL "https://ggops.$DOMAIN"                          # the GG-Ops this portal connects to
