@@ -91,7 +91,8 @@ fill SONAR_DB_PASSWORD "$(openssl rand -hex 24)"
 fill GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 32)"
 fill PORTAL_PASSWORD "$(openssl rand -hex 10)"                   # login without the GitHub App: sees everything
 fill ADMIN_PASSWORD "$(openssl rand -hex 10)"                    # ... and can change Settings
-for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS; do
+fill MCP_TOKEN "$(openssl rand -hex 24)"                         # coding agents (Claude Code, Codex, ChatGPT) over MCP
+for k in GITHUB_TOKEN GITHUB_APP_ID GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET ADMINS EXTRA_REPOS; do
   if [ -n "${!k:-}" ]; then setkv "$k" "${!k}"; fi
 done
 
@@ -99,7 +100,7 @@ done
 LLM_TAG=""
 if [ "${LOCAL_LLM:-}" = "off" ]; then
   setkv COMPOSE_PROFILES https
-  for k in LLM_KIND LLM_BASE_URL LLM_MODEL LLM_API_KEY LLM_TIMEOUT REVIEW_CHUNK_CHARS REVIEW_MAX_CHARS CHAT_TOOL_CHARS; do
+  for k in LLM_KIND LLM_BASE_URL LLM_MODEL LLM_API_KEY LLM_TIMEOUT REVIEW_CHUNK_CHARS REVIEW_MAX_CHARS CHAT_TOOL_CHARS DOCS_CONTEXT_CHARS; do
     setkv "$k" ""
   done
 elif [ -n "${LOCAL_LLM:-}" ]; then
@@ -110,6 +111,10 @@ elif [ -n "${LOCAL_LLM:-}" ]; then
   else LLM_TAG="qwen2.5-coder:1.5b-instruct-q8_0"                               # ~2 GB
   fi
   echo "Local model: $LLM_TAG (VM has ${ram_gb} GB RAM)"
+  # Models an Ollama install on this VM already downloaded are reused instead of downloaded again.
+  for d in /usr/share/ollama/.ollama "$HOME/.ollama"; do
+    if [ -z "$(getkv OLLAMA_DIR)" ] && $SUDO test -d "$d/models"; then setkv OLLAMA_DIR "$d"; echo "Reusing the models in $d"; fi
+  done
   ctx="${LLM_CONTEXT:-16384}"
   setkv COMPOSE_PROFILES "https,llm"
   setkv LLM_CONTEXT "$ctx"
@@ -122,8 +127,11 @@ elif [ -n "${LOCAL_LLM:-}" ]; then
   setkv REVIEW_CHUNK_CHARS $(( (ctx - 4000) * 3 ))                 # leave room for instructions and the answer
   setkv REVIEW_MAX_CHARS $(( (ctx - 4000) * 12 ))
   setkv CHAT_TOOL_CHARS 6000
+  setkv DOCS_CONTEXT_CHARS $(( (ctx - 5000) * 3 ))                # code facts per documentation request
 fi
 fill COMPOSE_PROFILES https
+# A plain re-run keeps the local model and finishes a download an earlier run didn't.
+if [ -z "$LLM_TAG" ] && [[ "$(getkv COMPOSE_PROFILES)" == *llm* ]]; then LLM_TAG="$(getkv LLM_MODEL)"; fi
 chmod 600 .env
 
 say "GitHub App private key (optional)"
@@ -138,6 +146,18 @@ say "Starting (the first build takes a few minutes)"
 $DOCKER compose up -d --build --remove-orphans     # COMPOSE_PROFILES in .env picks https / llm
 if [ "${LOCAL_LLM:-}" = "off" ]; then $DOCKER compose --profile llm rm -sf llm; fi
 
+if [ -n "$LLM_TAG" ]; then   # while Caddy gets its certificate
+  say "Local model $LLM_TAG"
+  for _ in $(seq 1 30); do $DOCKER compose exec -T llm ollama list >/dev/null 2>&1 && break; sleep 2; done
+  if $DOCKER compose exec -T llm ollama show "$LLM_TAG" >/dev/null 2>&1; then
+    echo "already downloaded"
+  elif $DOCKER compose exec -T llm ollama pull "$LLM_TAG"; then
+    echo "downloaded. CPU-only answers take a while: tens of seconds for chat, minutes per review."
+  else
+    echo "The download failed or was interrupted; re-run install.sh to resume it." >&2
+  fi
+fi
+
 say "Waiting for https://$DOMAIN"
 ok=""
 for _ in $(seq 1 60); do
@@ -151,12 +171,6 @@ else
   echo "(Let's Encrypt must reach port 80), then: $DOCKER compose logs caddy"
 fi
 
-if [ -n "$LLM_TAG" ]; then
-  say "Downloading $LLM_TAG (one time, a few GB)"
-  $DOCKER compose exec -T llm ollama pull "$LLM_TAG"
-  echo "Local model ready. CPU-only answers take a while: expect tens of seconds for chat, minutes per review."
-fi
-
 app_ready=""
 if [ -n "$(getkv GITHUB_APP_ID)" ] && $SUDO test -f secrets/github-app.pem; then app_ready=1; fi
 
@@ -166,7 +180,12 @@ Portal     https://$DOMAIN
            viewer password  $(getkv PORTAL_PASSWORD)
            admin password   $(getkv ADMIN_PASSWORD)   (can change Settings: LLM key, Sonar token)
 SonarQube  https://$DOMAIN/sonar   (first login admin / admin, then change it)
+MCP        https://$DOMAIN/mcp/$(getkv MCP_TOKEN)
+           (Claude Code, Codex, ChatGPT, Mistral: Settings shows the exact command for each)
 EOF
+if [ -n "$LLM_TAG" ]; then
+  echo "Local model  $LLM_TAG   (Settings lists every downloaded model; one click switches to it)"
+fi
 if [ -z "$(getkv GITHUB_TOKEN)" ] && [ -z "$app_ready" ]; then
   cat <<EOF
 

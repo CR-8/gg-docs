@@ -6,6 +6,8 @@ import json
 import os
 from dataclasses import dataclass, field
 
+import httpx
+
 from . import db
 
 # Defaults come from the environment (install.sh points them at the local model when LOCAL_LLM is used);
@@ -30,8 +32,27 @@ def config():
     return cfg
 
 
+def usable(cfg):
+    """A key, or an OpenAI-compatible server of our own (Ollama, llama.cpp, vLLM), which needs none."""
+    return bool(cfg["llm_api_key"] or (cfg["llm_kind"] == "openai" and cfg["llm_base_url"]))
+
+
 def configured():
-    return bool(config()["llm_api_key"])
+    return usable(config())
+
+
+OLLAMA_URL = env("OLLAMA_URL", "http://llm:11434").rstrip("/")  # the compose "llm" service (install.sh LOCAL_LLM)
+
+
+def local_models():
+    """Models already downloaded into the local Ollama; [] when there is none."""
+    try:
+        r = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        r.raise_for_status()
+        return [{"name": m["name"], "size": m.get("size", 0), "params": m.get("details", {}).get("parameter_size"),
+                 "quant": m.get("details", {}).get("quantization_level")} for m in r.json().get("models", [])]
+    except (httpx.HTTPError, ValueError, KeyError):
+        return []
 
 
 @dataclass
@@ -67,7 +88,7 @@ def parse_args(raw):
 class Conversation:
     def __init__(self, system, cfg=None):
         self.cfg = cfg or config()
-        if not self.cfg.get("llm_api_key"):
+        if not usable(self.cfg):
             raise LLMError("No LLM is configured. An admin can set one in Settings.")
         self.system, self.messages = system, []
         self.kind, self.model = self.cfg["llm_kind"], self.cfg["llm_model"]
@@ -76,8 +97,9 @@ class Conversation:
             import anthropic
             self.client = anthropic.Anthropic(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3, timeout=TIMEOUT)
         else:
-            import openai
-            self.client = openai.OpenAI(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3, timeout=TIMEOUT)
+            import openai  # the SDK insists on a key; local servers ignore it
+            self.client = openai.OpenAI(api_key=self.cfg["llm_api_key"] or "none", base_url=base_url, max_retries=3,
+                                        timeout=TIMEOUT)
 
     def add_user(self, text):
         self.messages.append({"role": "user", "content": text})

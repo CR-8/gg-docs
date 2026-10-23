@@ -3,30 +3,33 @@
     uvicorn portal.main:app --host 0.0.0.0 --port 7000
 """
 import asyncio
-import html
+import difflib
+import io
 import json
 import os
+import re
 import secrets
+import zipfile
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import ADMINS, ORG, PUBLIC_URL, REPOS, ROOT, SITE, SONAR_PUBLIC_URL, chat, db, llm, sync
+from . import ADMINS, ORG, PUBLIC_URL, REPOS, ROOT, SITE, SONAR_PUBLIC_URL, chat, db, docgen, llm, mcp, sync
 from .github import gh, verify_signature
 from .review import SEVERITIES
 
-PAGES = ROOT / "portal" / "pages"
-FAVICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' "
-           "height='32' rx='8' fill='%235bbfa8'/%3E%3Ctext x='16' y='21' font-family='monospace' font-weight='700' "
-           "font-size='14' text-anchor='middle' fill='%2306211b'%3Egg%3C/text%3E%3C/svg%3E")
-PUBLIC = ("/auth/", "/webhook/github", "/healthz", "/static/style.css")
+WEB = ROOT / "web" / "dist"  # the Astro frontend: cd web && npm run build
+PUBLIC = ("/auth/", "/webhook/github", "/healthz", "/login", "/_astro/", "/favicon.svg", "/mcp")  # /mcp: own token
+MCP_TOKEN = os.environ.get("MCP_TOKEN", "")
+# owner/name; neither part "." or "..", which would put the clone outside data/repos
+REPO_NAME = re.compile(r"^(?!\.{1,2}/)[A-Za-z0-9_.-]+/(?!\.{1,2}$)[A-Za-z0-9_.-]+$")
 DEV_USER = os.environ.get("DEV_USER", "")  # local development only: honoured for loopback requests
 # Shared passwords, for running without the GitHub App: admin can change Settings, team can see everything.
 PASSWORDS = {role: pw for role, pw in (("admin", os.environ.get("ADMIN_PASSWORD", "")),
@@ -37,6 +40,7 @@ WEIGHT = {"critical": 8, "major": 3, "minor": 1, "nit": 0.5}
 @asynccontextmanager
 async def lifespan(_app):
     db.init()
+    REPOS.extend(r for r in db.setting("extra_repos", []) if r not in REPOS)  # added in Settings
     if os.environ.get("DISABLE_WORKER") != "1":
         sync.start()
     yield
@@ -82,27 +86,18 @@ def healthz():
 
 # ---------- login ----------
 
-def safe_next(path):
-    return path if path.startswith("/") and not path.startswith("//") else "/"
+def safe_next(path):  # same-site paths only: "//host" and "/\host" both leave the site in browsers
+    return path if path.startswith("/") and not path.startswith(("//", "/\\")) else "/"
 
 
-def login_page(nxt, error="", status_code=200):
-    github = (f'<a class="card" href="/auth/github?next={quote(nxt)}" style="margin-bottom:12px"><b>Sign in with GitHub</b>'
-              f'<span>{ORG} members</span></a>') if gh.oauth_enabled else ""
-    form = ('<form method="post" action="/auth/password" class="panel">'
-            f'<input type="hidden" name="next" value="{quote(nxt)}">'
-            '<label for="pw" style="margin-top:0">Password</label>'
-            '<div class="row" style="margin:0"><input id="pw" name="password" type="password" autofocus required '
-            'autocomplete="current-password" style="flex:1"><button class="primary">Sign in</button></div>'
-            f'{f"<p class=error>{error}</p>" if error else ""}'
-            '<p class="hint">The viewer password shows everything; the admin password can also change Settings.</p>'
-            '</form>') if PASSWORDS else ""
-    return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                        '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title>'
-                        f'<link rel="icon" href="{FAVICON}"><link rel="stylesheet" href="/static/style.css"></head>'
-                        '<body><main class="login"><div class="brand-lg"><span class="mark">gg</span>GeneGenius</div>'
-                        '<h1>Engineering portal</h1><p class="lede">Architecture, activity, reviews and code quality '
-                        f'for the GeneGenius repositories.</p>{github}{form}</main></body></html>', status_code=status_code)
+def to_login(nxt="/", error=""):
+    """The sign-in page (web/src/pages/login.astro) shows `error` as text."""
+    return RedirectResponse(f"/login/?next={quote(safe_next(nxt))}" + (f"&error={quote(error)}" if error else ""), 303)
+
+
+@app.get("/auth/methods")
+def methods():
+    return {"github": gh.oauth_enabled, "password": bool(PASSWORDS), "org": ORG}
 
 
 @app.get("/auth/login")
@@ -112,7 +107,7 @@ def login(request: Request, next: str = "/"):
                             "or the GitHub App's GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET.", status_code=503)
     if gh.oauth_enabled and not PASSWORDS:
         return github_login(request, next)
-    return login_page(safe_next(next))
+    return to_login(next)
 
 
 @app.get("/auth/github")
@@ -127,12 +122,12 @@ def github_login(request: Request, next: str = "/"):
 @app.post("/auth/password")
 async def password_login(request: Request):
     form = parse_qs((await request.body()).decode(), keep_blank_values=True)
-    given, nxt = form.get("password", [""])[0], safe_next(unquote(form.get("next", ["/"])[0]))
+    given, nxt = form.get("password", [""])[0], safe_next(form.get("next", ["/"])[0])
     role = next((role for role, secret in PASSWORDS.items()
                  if secrets.compare_digest(given.encode(), secret.encode())), None)
     if not role:
         await asyncio.sleep(1)  # slows down guessing
-        return login_page(nxt, "Wrong password.", 401)
+        return to_login(nxt, "Wrong password.")
     request.session["user"] = {"login": role, "admin": role == "admin"}
     return RedirectResponse(nxt, status_code=303)
 
@@ -141,13 +136,13 @@ async def password_login(request: Request):
 def callback(request: Request, code: str = "", state: str = ""):
     saved = request.session.pop("oauth", None) or {}
     if not code or not secrets.compare_digest(state, saved.get("state", "")):
-        return HTMLResponse("Login expired or invalid; <a href='/auth/login'>try again</a>.", status_code=400)
+        return to_login(error="The GitHub sign-in expired. Try again.")
     try:
         login_name = gh.oauth_login(code, f"{PUBLIC_URL}/auth/callback")
     except Exception as e:
-        return HTMLResponse(f"GitHub login failed: {e}", status_code=400)
+        return to_login(error=f"GitHub sign-in failed: {e}")
     if not gh.is_member(login_name):
-        return HTMLResponse(f"{login_name} is not a member of the {ORG} GitHub organisation.", status_code=403)
+        return to_login(error=f"{login_name} is not a member of the {ORG} GitHub organisation.")
     request.session["user"] = {"login": login_name, "admin": login_name.lower() in ADMINS}
     return RedirectResponse(saved.get("next") or "/")
 
@@ -155,7 +150,7 @@ def callback(request: Request, code: str = "", state: str = ""):
 @app.get("/auth/logout")
 def logout(request: Request):
     request.session.clear()
-    return HTMLResponse("Signed out. <a href='/auth/login'>Sign in again</a>.")
+    return to_login()
 
 
 # ---------- GitHub webhook ----------
@@ -189,20 +184,23 @@ def summary():
         ci[side] = {"repo": repo, "head": head, "total": len(rows),
                     "passed": sum(r["conclusion"] in ("success", "skipped", "neutral") for r in rows),
                     "failed": sum(r["conclusion"] in ("failure", "timed_out") for r in rows)}
+    last_sync = db.q("SELECT ok, detail FROM events WHERE kind='sync' ORDER BY id DESC LIMIT 1")
     return {"ci": ci, "sonar_url": SONAR_PUBLIC_URL or None,
             "open_breakages": db.q("SELECT COUNT(*) n FROM breakages WHERE fixed_sha IS NULL")[0]["n"],
-            "worker": sync.status(), "github": gh.mode, "llm": llm.configured()}
+            "worker": sync.status(), "github": gh.mode, "llm": llm.configured(), "llm_model": llm.config()["llm_model"],
+            "repos": REPOS, "extra_repos": db.setting("extra_repos", []),
+            "sync_error": last_sync[0]["detail"] if last_sync and not last_sync[0]["ok"] else None}
 
 
 @app.get("/api/activity")
 def activity(repo: str = "", branch: str = "", person: str = "", days: int = 30, limit: int = 100):
+    limit = max(1, min(limit, 500))  # SQLite reads LIMIT -1 as "no limit"
     where, args = ["p.pushed_at >= ?"], [since(days)]
     for col, val in (("p.repo", repo), ("p.branch", branch), ("p.pusher", person)):
         if val:
             where.append(f"{col} = ?")
             args.append(val)
-    pushes = db.q(f"SELECT * FROM pushes p WHERE {' AND '.join(where)} ORDER BY p.pushed_at DESC LIMIT ?",
-                  *args, min(limit, 500))
+    pushes = db.q(f"SELECT * FROM pushes p WHERE {' AND '.join(where)} ORDER BY p.pushed_at DESC LIMIT ?", *args, limit)
     for p in pushes:
         p["commit_list"] = db.q("SELECT c.sha, c.person, c.message, c.additions, c.deletions FROM push_commits pc "
                                 "JOIN commits c ON c.repo=? AND c.sha=pc.sha WHERE pc.push_id=? "
@@ -220,7 +218,7 @@ def activity(repo: str = "", branch: str = "", person: str = "", days: int = 30,
             c_args.append(val)
     commits = db.q(f"SELECT repo, sha, person, author_name, committed_at, message, additions, deletions, is_merge, "
                    f"on_default FROM commits WHERE {' AND '.join(c_where)} ORDER BY committed_at DESC LIMIT ?",
-                   *c_args, min(limit, 500))
+                   *c_args, limit)
     return {"pushes": pushes, "commits": commits}
 
 
@@ -279,7 +277,7 @@ def breakages(days: int = 90):
 def reviews(limit: int = 100):
     return db.q("SELECT r.*, COUNT(f.id) findings, SUM(f.severity='critical') critical, SUM(f.severity='major') major, "
                 "SUM(f.category='slop') slop FROM reviews r LEFT JOIN findings f ON f.review_id=r.id "
-                "GROUP BY r.id ORDER BY r.id DESC LIMIT ?", min(limit, 500))
+                "GROUP BY r.id ORDER BY r.id DESC LIMIT ?", max(1, min(limit, 500)))
 
 
 @app.get("/api/reviews/{rid}")
@@ -303,8 +301,10 @@ async def ask(request: Request):
     question = str(body.get("question", "")).strip()
     if not question:
         raise HTTPException(400, "question is required")
+    history = body.get("history")
+    history = [m for m in history if isinstance(m, dict)] if isinstance(history, list) else []
     try:
-        return await run_in_threadpool(chat.answer, body.get("history") or [], question)
+        return await run_in_threadpool(chat.answer, history, question)
     except llm.LLMError as e:
         return JSONResponse({"error": str(e)}, status_code=502)
 
@@ -349,8 +349,12 @@ async def put_settings(request: Request):
     require_admin(request)
     body = await request.json()
     cfg = merged_settings(body)
-    for key in (*llm.DEFAULTS, "llm_api_key"):
-        db.set_setting(key, cfg[key])
+    # Store only what differs from .env, so later .env changes (install.sh LOCAL_LLM) still take effect.
+    for key, default in {**llm.DEFAULTS, "llm_api_key": os.environ.get("LLM_API_KEY", "")}.items():
+        if cfg[key] == default:
+            db.x("DELETE FROM settings WHERE key=?", key)
+        else:
+            db.set_setting(key, cfg[key])
     if body.get("sonar_token"):
         db.set_setting("sonar_token", str(body["sonar_token"]).strip())
     if "post_reviews" in body:
@@ -368,6 +372,114 @@ async def test_settings(request: Request):
         return {"ok": False, "reply": str(e)}
 
 
+@app.get("/api/settings/local")
+def local_llm():
+    """Models already downloaded into the local Ollama, for the one-click "Local model" choice in Settings."""
+    return {"base_url": f"{llm.OLLAMA_URL}/v1", "models": llm.local_models()}
+
+
+@app.get("/api/settings/mcp")
+def mcp_settings(request: Request):
+    require_admin(request)
+    return {"url": f"{PUBLIC_URL}/mcp", "token_url": f"{PUBLIC_URL}/mcp/{MCP_TOKEN}" if MCP_TOKEN else None,
+            "token": MCP_TOKEN or None}
+
+
+# ---------- generated docs (portal/docgen.py) ----------
+
+def repo_named(name):
+    repo = next((r for r in REPOS if r.split("/")[1] == name), None)
+    if not repo:
+        raise HTTPException(404, "unknown repository")
+    return repo
+
+
+DOC_ORDER = ("CASE kind WHEN 'overview' THEN 0 WHEN 'architecture' THEN 1 WHEN 'data-flow' THEN 2 "
+             "WHEN 'system-design' THEN 3 WHEN 'ml-system' THEN 4 WHEN 'api' THEN 5 ELSE 6 END, title")
+
+
+@app.get("/api/docs")
+def docs_index():
+    return [{"repo": r, "name": r.split("/")[1], "status": docgen.status(r),
+             "docs": db.q("SELECT slug, kind, title, summary, status, error, model, head_sha, generated_at FROM docs "
+                          f"WHERE repo=? ORDER BY {DOC_ORDER}", r)} for r in REPOS]
+
+
+@app.get("/api/docs/search")
+def docs_search(q: str = ""):
+    return docgen.search(q)
+
+
+@app.get("/api/docs/{name}/zip")
+def docs_zip(name: str):
+    repo = repo_named(name)
+    rows = db.q(f"SELECT slug, title, summary, content FROM docs WHERE repo=? ORDER BY {DOC_ORDER}", repo)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        index = [f"# {repo} documentation", ""] + [
+            f"- [{r['title']}]({r['slug']}.md){' - ' + r['summary'] if r['summary'] else ''}" for r in rows]
+        z.writestr(f"{name}-docs/README.md", "\n".join(index) + "\n")
+        for r in rows:
+            z.writestr(f"{name}-docs/{r['slug']}.md", r["content"])
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-docs.zip"'})
+
+
+@app.get("/api/docs/{name}/history/{slug:path}")
+def doc_history(name: str, slug: str):
+    return db.q("SELECT id, head_sha, generated_at, model, LENGTH(content) size FROM doc_versions "
+                "WHERE repo=? AND slug=? ORDER BY id DESC LIMIT 100", repo_named(name), slug)
+
+
+@app.get("/api/docs/{name}/diff/{vid}")
+def doc_diff(name: str, vid: int):
+    """What version `vid` changed compared with the version before it."""
+    v = db.q("SELECT * FROM doc_versions WHERE id=? AND repo=?", vid, repo_named(name))
+    if not v:
+        raise HTTPException(404)
+    prev = db.q("SELECT content, head_sha FROM doc_versions WHERE repo=? AND slug=? AND id<? ORDER BY id DESC LIMIT 1",
+                v[0]["repo"], v[0]["slug"], vid)
+    before = prev[0]["content"] if prev else ""
+    return {"diff": "".join(difflib.unified_diff(before.splitlines(True), v[0]["content"].splitlines(True),
+                                                 prev[0]["head_sha"][:8] if prev else "(new)", v[0]["head_sha"][:8]))}
+
+
+@app.get("/api/docs/{name}/{slug:path}")
+def doc(name: str, slug: str, download: bool = False):
+    r = db.q("SELECT * FROM docs WHERE repo=? AND slug=?", repo_named(name), slug)
+    if not r:
+        raise HTTPException(404, "no such document yet")
+    if download:
+        return Response(r[0]["content"], media_type="text/markdown; charset=utf-8", headers={
+            "Content-Disposition": f'attachment; filename="{name}-{slug.replace("/", "-")}.md"'})
+    return r[0]
+
+
+# ---------- MCP server (portal/mcp.py) ----------
+
+@app.post("/mcp")
+@app.post("/mcp/{token}")
+async def mcp_endpoint(request: Request, token: str = ""):
+    given = token or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not (MCP_TOKEN and secrets.compare_digest(given.encode(), MCP_TOKEN.encode())):
+        return JSONResponse({"error": "MCP_TOKEN missing or wrong" if MCP_TOKEN else "MCP is off: set MCP_TOKEN"}, 401)
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse(mcp.error(None, -32700, "Parse error"), 400)
+    if isinstance(body, list):  # batches (protocol 2025-03-26)
+        out = [r for r in [await run_in_threadpool(mcp.handle, m) for m in body] if r]
+        return JSONResponse(out) if out else Response(status_code=202)
+    out = await run_in_threadpool(mcp.handle, body)
+    return JSONResponse(out) if out else Response(status_code=202)
+
+
+@app.api_route("/mcp", methods=["GET", "DELETE"])
+@app.api_route("/mcp/{token}", methods=["GET", "DELETE"])
+def mcp_no_stream(token: str = ""):
+    return Response(status_code=405, headers={"Allow": "POST"})  # stateless: no server stream, no sessions
+
+
 @app.post("/api/admin/{action}")
 async def admin_action(action: str, request: Request):
     require_admin(request)
@@ -379,6 +491,17 @@ async def admin_action(action: str, request: Request):
         sync.enqueue("rebuild")
     elif action == "review" and body.get("repo") in REPOS and str(body.get("pr", "")).isdigit():
         sync.enqueue("review_pr", body["repo"], int(body["pr"]))
+    elif action == "docs" and body.get("repo") in REPOS:  # rewrite every document, or one (slug)
+        docgen.enqueue(body["repo"], body.get("slug") or None, force=True)
+    elif action == "add_repo" and REPO_NAME.match(repo := str(body.get("repo", "")).strip()):
+        if repo.split("/")[1] in {r.split("/")[1] for r in REPOS}:
+            raise HTTPException(400, f"a repository named {repo.split('/')[1]} is already synced")
+        REPOS.append(repo)
+        db.set_setting("extra_repos", [*db.setting("extra_repos", []), repo])
+        sync.enqueue("sync", repo)  # clone, history, PRs, then its documentation
+    elif action == "remove_repo" and body.get("repo") in db.setting("extra_repos", []):
+        REPOS.remove(body["repo"])
+        db.set_setting("extra_repos", [r for r in db.setting("extra_repos", []) if r != body["repo"]])
     else:
         raise HTTPException(400, "unknown action")
     return {"queued": action, **sync.status()}
@@ -386,29 +509,5 @@ async def admin_action(action: str, request: Request):
 
 # ---------- pages ----------
 
-def page_route(file):
-    return lambda: FileResponse(file)  # no parameters, so FastAPI reads no query args
-
-
-for name in ("activity", "people", "reviews", "chat", "settings"):
-    app.add_api_route(f"/{name}", page_route(PAGES / f"{name}.html"), methods=["GET"], include_in_schema=False)
-app.mount("/static", StaticFiles(directory=PAGES), name="static")
-
-
-@app.get("/", include_in_schema=False)
-def index():
-    if (SITE / "index.html").exists():
-        return FileResponse(SITE / "index.html")
-    failed = db.q("SELECT detail FROM events WHERE kind='sync' AND ok=0 ORDER BY id DESC LIMIT 1")
-    problem = (f"<p class='error'>The last sync failed:</p><pre style='white-space:pre-wrap'>"
-               f"{html.escape(failed[0]['detail'])}</pre>") if failed else ""
-    return HTMLResponse("<!doctype html><html><head><meta charset='utf-8'><title>GeneGenius portal</title>"
-                        f"<link rel=\"icon\" href=\"{FAVICON}\"><link rel='stylesheet' href='/static/style.css'></head><body>"
-                        "<main class='login' style='max-width:640px'><div class='brand-lg'><span class='mark'>gg</span>GeneGenius</div>"
-                        "<h1>Getting things ready</h1><p class='lede'>The first sync and build are running. This page fills in "
-                        "when they finish, usually a few minutes. <a href='/settings'>Settings</a> shows progress, and "
-                        "<a href='/activity'>Activity</a> and <a href='/chat'>Ask</a> work already.</p>" + problem
-                        + "</main></body></html>")
-
-
-app.mount("/", StaticFiles(directory=SITE, html=True, check_dir=False), name="site")
+app.mount("/site", StaticFiles(directory=SITE, check_dir=False), name="site")  # what build.py generates
+app.mount("/", StaticFiles(directory=WEB, html=True, check_dir=False), name="web")

@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Reviews } from "@/components/Reviews"
+---
+
+<Layout title="Reviews" description="What the review bot found in each PR and direct push, and who wrote each flagged line. Click a row for the findings.">
+  <Reviews client:only="react" />
+</Layout>

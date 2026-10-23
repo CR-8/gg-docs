@@ -1,0 +1,102 @@
+import { useEffect, useRef, useState } from "react"
+import { ArrowUpRight } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { SIDES, VIEWS, viewsFor, type Side, type View } from "@/lib/views"
+import { Empty, Loading } from "@/components/common"
+import { Markdown } from "@/components/Markdown"
+import { Button } from "@/components/ui/button"
+
+/** Links styled like shadcn's TabsList, since each tab is its own page. */
+function LinkTabs({ items }: { items: { href: string; label: string; on: boolean }[] }) {
+  return (
+    <nav className="bg-muted text-muted-foreground inline-flex flex-wrap rounded-lg p-[3px]">
+      {items.map((t) => (
+        <a
+          key={t.href}
+          href={t.href}
+          aria-current={t.on ? "page" : undefined}
+          className={cn(
+            "rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
+            t.on ? "bg-background text-foreground shadow-sm" : "hover:text-foreground"
+          )}
+        >
+          {t.label}
+        </a>
+      ))}
+    </nav>
+  )
+}
+
+function Mermaid({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let live = true
+    ;(async () => {
+      const [{ default: mermaid }, { default: svgPanZoom }] = await Promise.all([import("mermaid"), import("svg-pan-zoom")])
+      mermaid.initialize({
+        startOnLoad: false, maxEdges: 20000, maxTextSize: 10_000_000, flowchart: { useMaxWidth: false },
+        theme: document.documentElement.classList.contains("dark") ? "dark" : "default",
+      })
+      const { svg } = await mermaid.render("import-map", text)
+      if (!live || !ref.current) return
+      ref.current.innerHTML = svg // mermaid sanitises labels (securityLevel "strict")
+      const el = ref.current.querySelector("svg")!
+      el.removeAttribute("width")
+      el.removeAttribute("height")
+      el.style.cssText = "width:100%;height:100%;max-width:none"
+      // diagrams come out thousands of px wide: fit, then wheel-zoom and drag-pan
+      svgPanZoom(el, { controlIconsEnabled: true, fit: true, center: true, minZoom: 0.05, maxZoom: 40, zoomScaleSensitivity: 0.3 })
+    })()
+    return () => {
+      live = false
+    }
+  }, [text])
+  return <div ref={ref} className="size-full" />
+}
+
+export function ViewFrame({ side, view }: { side: Side; view: View }) {
+  const file = `/site/${side}/${VIEWS[view].file}`
+  const frame = file.endsWith(".html")
+  const [content, setContent] = useState<string | null | undefined>() // undefined = loading, null = not built
+  useEffect(() => {
+    fetch(file, frame ? { method: "HEAD" } : undefined)
+      .then((r) => (r.ok ? (frame ? "" : r.text()) : null))
+      .then(setContent, () => setContent(null))
+  }, [file])
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <LinkTabs
+          items={(Object.keys(SIDES) as Side[]).map((s) => ({
+            href: `/views/${s}/${viewsFor(s).includes(view) ? view : "graph"}/`, label: SIDES[s].name, on: s === side,
+          }))}
+        />
+        <LinkTabs items={viewsFor(side).map((v) => ({ href: `/views/${side}/${v}/`, label: VIEWS[v].name, on: v === view }))} />
+        {content != null && (
+          <Button variant="outline" size="sm" className="ml-auto" asChild>
+            <a href={file} target="_blank" rel="noreferrer">
+              {frame ? "Full screen" : "Raw file"} <ArrowUpRight />
+            </a>
+          </Button>
+        )}
+      </div>
+      <div className="bg-card h-[calc(100svh-15rem)] min-h-[28rem] overflow-hidden rounded-xl border">
+        {content === undefined ? (
+          <Loading rows={6} />
+        ) : content === null ? (
+          <Empty title="Not built yet">
+            This view appears after the next build. Admins can start one from{" "}
+            <a className="link" href="/settings/">Settings</a> → Rebuild views.
+          </Empty>
+        ) : frame ? (
+          <iframe src={file} title={`${SIDES[side].name} ${VIEWS[view].name}`} className="size-full" />
+        ) : file.endsWith(".mmd") ? (
+          <Mermaid text={content} />
+        ) : (
+          <Markdown text={content} className="h-full overflow-auto p-6" />
+        )}
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Ask } from "@/components/Ask"
+---
+
+<Layout title="Ask" description="Plain-language questions about git history, pushes, CI, reviews, SonarQube and the code graph. Each answer lists the lookups it made.">
+  <Ask client:only="react" />
+</Layout>

@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS pushes(
   id INTEGER PRIMARY KEY, repo TEXT, branch TEXT, before TEXT, after TEXT, pusher TEXT,
   pushed_at TEXT, forced INT, commits INT, source TEXT, UNIQUE(repo, branch, before, after));
 CREATE TABLE IF NOT EXISTS push_commits(push_id INT, sha TEXT, PRIMARY KEY(push_id, sha));
+-- pull requests from GitHub (every sync and every pull_request webhook); state = open|closed|merged
+CREATE TABLE IF NOT EXISTS pulls(
+  repo TEXT, number INT, title TEXT, author TEXT, state TEXT, draft INT, base TEXT, head TEXT, head_sha TEXT,
+  created_at TEXT, updated_at TEXT, merged_at TEXT, url TEXT, PRIMARY KEY(repo, number));
 -- latest completed CI check run per commit and check name
 CREATE TABLE IF NOT EXISTS checks(
   repo TEXT, sha TEXT, name TEXT, conclusion TEXT, completed_at TEXT, url TEXT, PRIMARY KEY(repo, sha, name));
@@ -41,6 +45,14 @@ CREATE TABLE IF NOT EXISTS findings(
 CREATE TABLE IF NOT EXISTS sonar_issues(
   taken_on TEXT, repo TEXT, author_email TEXT, quality TEXT, count INT,
   PRIMARY KEY(taken_on, repo, author_email, quality));
+-- documents the portal writes for each repository (docgen.py); inputs = fingerprint of what it was written from
+CREATE TABLE IF NOT EXISTS docs(
+  repo TEXT, slug TEXT, kind TEXT, title TEXT, summary TEXT, content TEXT, inputs TEXT, head_sha TEXT, model TEXT,
+  generated_at TEXT, status TEXT, error TEXT, PRIMARY KEY(repo, slug));
+CREATE TABLE IF NOT EXISTS doc_versions(
+  id INTEGER PRIMARY KEY, repo TEXT, slug TEXT, head_sha TEXT, content TEXT, generated_at TEXT, model TEXT);
+CREATE INDEX IF NOT EXISTS doc_versions_slug ON doc_versions(repo, slug, id);
+CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(repo UNINDEXED, slug UNINDEXED, title, content);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, at TEXT, kind TEXT, detail TEXT, ok INT);
 """
 
@@ -88,4 +100,5 @@ def set_setting(key, value):
 
 
 def schema_text():
-    return "\n".join(r["sql"] for r in q("SELECT sql FROM sqlite_master WHERE type='table' AND name != 'settings'"))
+    return "\n".join(r["sql"] for r in q("SELECT sql FROM sqlite_master WHERE type='table' AND name != 'settings' "
+                                          "AND name NOT LIKE 'docs_fts%' AND sql IS NOT NULL"))

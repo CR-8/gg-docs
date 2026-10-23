@@ -1,0 +1,52 @@
+"""MCP server for coding agents: Claude Code, Codex, ChatGPT, Mistral Le Chat, Cursor, Gemini CLI, any MCP client.
+
+Streamable HTTP, stateless: each POST carries JSON-RPC and gets a plain JSON answer (the spec allows that instead of
+an SSE stream), so there are no sessions to keep. Read-only: the same tools as Ask (chat.py), with larger results.
+Auth is MCP_TOKEN, as `Authorization: Bearer <token>` or in the URL (/mcp/<token>) for clients that only take a URL.
+"""
+from datetime import date
+
+from . import BACKEND_REPO, FRONTEND_REPO, db
+from .chat import SYSTEM, TOOLS, run_tool
+
+OLDEST = "2025-03-26"  # first version with Streamable HTTP
+LATEST = "2025-11-25"
+LIMIT = 50_000  # characters per tool result (~12k tokens), under Claude Code's default MCP output cap
+
+
+def error(mid, code, message):
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}
+
+
+def handle(msg):
+    """One JSON-RPC message -> its response, or None for a notification."""
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
+        return error(msg.get("id") if isinstance(msg, dict) else None, -32600, "Invalid Request")
+    if "id" not in msg:
+        return None  # notifications/initialized, notifications/cancelled: nothing to answer
+    mid, method, params = msg["id"], msg["method"], msg.get("params") or {}
+    if method == "initialize":
+        asked = str(params.get("protocolVersion", ""))
+        result = {
+            # ponytail: a tools-only stateless server reads the same in every version since 2025-03-26, so the
+            # client's own version is echoed; pin a list here if a future version changes tools/list or tools/call.
+            "protocolVersion": asked if asked >= OLDEST else LATEST,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "genegenius-portal", "title": "GeneGenius engineering portal", "version": "1.0.0"},
+            "instructions": SYSTEM.format(backend=BACKEND_REPO, frontend=FRONTEND_REPO,
+                                          today=date.today().isoformat(), schema=db.schema_text()),
+        }
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": [{"name": t["name"], "description": t["description"], "inputSchema": t["parameters"],
+                             "annotations": {"readOnlyHint": True, "openWorldHint": False}} for t in TOOLS]}
+    elif method == "tools/call":
+        name, args = params.get("name"), params.get("arguments") or {}
+        if name not in {t["name"] for t in TOOLS}:
+            return error(mid, -32602, f"Unknown tool: {name}")
+        out = run_tool(name, args if isinstance(args, dict) else {}, LIMIT)
+        result = {"content": [{"type": "text", "text": out}], "isError": False}
+    else:
+        return error(mid, -32601, f"Method not found: {method}")
+    return {"jsonrpc": "2.0", "id": mid, "result": result}

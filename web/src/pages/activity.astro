@@ -1,0 +1,8 @@
+---
+import Layout from "@/layouts/main.astro"
+import { Activity } from "@/components/Activity"
+---
+
+<Layout title="Activity" description="Who pushed what, what CI said about it, and which pushes broke a check that was passing before.">
+  <Activity client:only="react" />
+</Layout>

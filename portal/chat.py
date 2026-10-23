@@ -6,12 +6,13 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 
-from . import BACKEND_REPO, FRONTEND_REPO, REPOS, SITE, SONAR_KEYS, SONAR_URL, WORK, db, llm, repo_dir
+from . import BACKEND_REPO, FRONTEND_REPO, REPOS, SITE, SONAR_KEYS, SONAR_URL, WORK, db, docgen, llm, repo_dir
+from .github import gh
 from .sync import sonar_token
 
 MAX_ROUNDS = 10
@@ -36,6 +37,8 @@ How the data is collected:
 - reviews / findings: the review bot's results per PR (pr > 0) or direct push (pr = 0, branch set); each finding
   is blamed to the person who wrote that line. category 'slop' = works but should not be merged as is.
 - sonar_issues: daily snapshot of open SonarQube issues per SCM author email.
+- pulls: pull requests (state open, closed or merged) from GitHub, refreshed on every sync and pull_request webhook;
+  reviews.pr joins to pulls.number.
 Weighted findings per 1k added lines uses nit 0.5, minor 1, major 3, critical 8.
 Today is {today}.
 
@@ -63,11 +66,30 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {
          "repo": {"type": "string", "enum": REPOS}, "author_email": {"type": "string"},
          "quality": {"type": "string", "enum": ["RELIABILITY", "SECURITY", "MAINTAINABILITY"]}}, "required": ["repo"]}},
+    {"name": "pull_requests", "description": "List pull requests, most recently updated first: title, author, state, "
+     "branches, head SHA, and how many review-bot findings the current head has.",
+     "parameters": {"type": "object", "properties": {
+         "repo": {"type": "string", "enum": REPOS}, "limit": {"type": "integer", "description": "default 30"},
+         "state": {"type": "string", "enum": ["open", "closed", "merged", "all"], "description": "default open"}}}},
+    {"name": "pull_request", "description": "One pull request: its details, the files it changes, every review of it "
+     "and the latest review's findings (with who wrote each flagged line).",
+     "parameters": {"type": "object", "properties": {
+         "repo": {"type": "string", "enum": REPOS}, "number": {"type": "integer"}}, "required": ["repo", "number"]}},
+    {"name": "recent_pushes", "description": "Pushes of the last few days: who pushed which commits to which branch, "
+     "CI results on each pushed head, and every CI check currently broken on a default branch.",
+     "parameters": {"type": "object", "properties": {
+         "days": {"type": "integer", "description": "default 7, at most 90"}, "repo": {"type": "string", "enum": REPOS}}}},
+    {"name": "docs", "description": "The documentation the portal writes and keeps current for each repository "
+     "(overview, architecture, data flow, system design, ML system, API, one per component, with diagrams). "
+     "No arguments: list every document. repo + slug: read one. query: full-text search across all of them.",
+     "parameters": {"type": "object", "properties": {
+         "repo": {"type": "string", "enum": REPOS}, "slug": {"type": "string", "description": "e.g. architecture, "
+         "data-flow, modules/services-annotation"}, "query": {"type": "string"}}}},
 ]
 
 
-def clip(text):
-    return text if len(text) <= MAX_OUT else text[:MAX_OUT] + "\n... (truncated)"
+def clip(text, limit=MAX_OUT):
+    return text if len(text) <= limit else text[:limit] + "\n... (truncated)"
 
 
 def tool_sql(query):
@@ -80,8 +102,8 @@ def tool_sql(query):
     try:
         cur = con.execute(q)
         rows = cur.fetchmany(200)
-        return clip(json.dumps({"columns": [d[0] for d in cur.description], "rows": [list(r) for r in rows],
-                                "truncated": len(rows) == 200}, default=str))
+        return json.dumps({"columns": [d[0] for d in cur.description], "rows": [list(r) for r in rows],
+                           "truncated": len(rows) == 200}, default=str)
     except Exception as e:
         return f"SQL error: {e}"
     finally:
@@ -93,7 +115,7 @@ def tool_commit_diff(repo, sha, path=""):
         return "Unknown repo or invalid sha."
     args = ["git", "show", "--no-color", "--format=fuller", sha] + (["--", path] if path else ["--stat"])
     r = subprocess.run(args, cwd=repo_dir(repo), capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return clip(r.stdout or r.stderr)
+    return r.stdout or r.stderr
 
 
 def tool_code_graph(side, question):
@@ -105,7 +127,7 @@ def tool_code_graph(side, question):
     r = subprocess.run([exe, "query", question, "--graph", str(graph), "--budget", "2000"], capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=60,
                        env=dict(os.environ, GRAPHIFY_NO_AUTO_REFRESH="1"))
-    return clip(r.stdout or r.stderr)
+    return r.stdout or r.stderr
 
 
 def tool_architecture(section=""):
@@ -119,7 +141,7 @@ def tool_architecture(section=""):
     for n, (i, lvl, title) in enumerate(heads):
         if section.lower() in title.lower():
             end = next((j for j, l2, _ in heads[n + 1:] if l2 <= lvl), len(lines))
-            return clip("\n".join(lines[i:end]))
+            return "\n".join(lines[i:end])
     return f"No section matching {section!r}."
 
 
@@ -140,16 +162,72 @@ def tool_sonar_issues(repo, author_email="", quality=""):
              "message": i.get("message"), "author": i.get("author"),
              "impacts": [f"{m['softwareQuality']}:{m['severity']}" for m in i.get("impacts", [])]}
             for i in data.get("issues", [])]
-    return clip(json.dumps({"total": data.get("total"), "issues": rows}))
+    return json.dumps({"total": data.get("total"), "issues": rows})
+
+
+def tool_pull_requests(repo="", state="open", limit=30):
+    where, args = ["(? = 'all' OR state = ?)"], [state, state]
+    if repo:
+        where.append("repo = ?")
+        args.append(repo)
+    return json.dumps(db.q(
+        "SELECT p.repo, p.number, p.title, p.author, p.state, p.draft, p.base, p.head, p.head_sha, p.created_at, "
+        "p.updated_at, p.merged_at, p.url, (SELECT COUNT(*) FROM reviews r WHERE r.repo=p.repo AND r.pr=p.number) reviews, "
+        "(SELECT COUNT(*) FROM findings f JOIN reviews r ON r.id=f.review_id WHERE r.repo=p.repo AND r.pr=p.number "
+        "AND r.head_sha=p.head_sha) findings_on_head "
+        f"FROM pulls p WHERE {' AND '.join(where)} ORDER BY p.updated_at DESC LIMIT ?", *args, max(1, min(int(limit), 200))))
+
+
+def tool_pull_request(repo, number):
+    pr = db.q("SELECT * FROM pulls WHERE repo=? AND number=?", repo, int(number))
+    reviews = db.q("SELECT id, head_sha, base_sha, model, summary, created_at, posted_url FROM reviews "
+                   "WHERE repo=? AND pr=? ORDER BY id", repo, int(number))
+    findings = db.q("SELECT path, line, severity, category, title, body, person FROM findings WHERE review_id=?",
+                    reviews[-1]["id"]) if reviews else []
+    files = []
+    if gh.enabled and repo in REPOS:  # what the PR touches, live from GitHub
+        try:
+            files = [{k: f[k] for k in ("filename", "status", "additions", "deletions")}
+                     for f in gh.paginate(f"/repos/{repo}/pulls/{int(number)}/files", limit=300)]
+        except Exception as e:
+            files = [f"could not list files: {e}"]
+    if not (pr or reviews):
+        return f"No PR #{number} in {repo} (the portal knows open PRs and the 50 most recently closed)."
+    return json.dumps({"pr": pr[0] if pr else None, "files": files, "reviews": reviews, "latest_findings": findings})
+
+
+def tool_recent_pushes(days=7, repo=""):
+    since = (datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 90)))).isoformat()
+    pushes = db.q("SELECT id, repo, branch, pusher, pushed_at, forced, commits, after FROM pushes WHERE pushed_at >= ? "
+                  "AND (? = '' OR repo = ?) ORDER BY pushed_at DESC LIMIT 100", since, repo, repo)
+    for p in pushes:
+        p["messages"] = [r["message"] for r in db.q("SELECT c.message FROM push_commits pc JOIN commits c ON "
+                                                     "c.repo=? AND c.sha=pc.sha WHERE pc.push_id=? LIMIT 20", p["repo"], p["id"])]
+        p["ci_on_head"] = {r["name"]: r["conclusion"] for r in db.q("SELECT name, conclusion FROM checks WHERE repo=? AND sha=?",
+                                                                    p["repo"], p["after"])}
+    return json.dumps({"pushes": pushes, "open_breakages": db.q(
+        "SELECT repo, branch, check_name, broken_sha, person, pusher, broken_at FROM breakages WHERE fixed_sha IS NULL")})
+
+
+def tool_docs(repo="", slug="", query=""):
+    if query:
+        return json.dumps(docgen.search(query))
+    if slug:
+        r = db.q("SELECT content FROM docs WHERE repo=? AND slug=?", repo, slug)
+        return r[0]["content"] if r else f"No document {slug!r} in {repo}; call docs without slug for the list."
+    return json.dumps(db.q("SELECT repo, slug, kind, title, summary, head_sha, generated_at, status FROM docs "
+                           "WHERE ? = '' OR repo = ? ORDER BY repo, kind = 'module', slug", repo, repo))
 
 
 RUN = {"sql": tool_sql, "commit_diff": tool_commit_diff, "code_graph": tool_code_graph,
-       "architecture": tool_architecture, "sonar_issues": tool_sonar_issues}
+       "architecture": tool_architecture, "sonar_issues": tool_sonar_issues, "pull_requests": tool_pull_requests,
+       "pull_request": tool_pull_request, "recent_pushes": tool_recent_pushes, "docs": tool_docs}
 
 
-def run_tool(name, args):
+def run_tool(name, args, limit=MAX_OUT):
+    """Tools return everything; the caller's limit cuts it (small for a local model in Ask, larger over MCP)."""
     try:
-        return RUN[name](**args) if name in RUN else f"Unknown tool {name}."
+        return clip(RUN[name](**args), limit) if name in RUN else f"Unknown tool {name}."
     except TypeError as e:
         return f"Bad arguments: {e}"
     except Exception as e:
