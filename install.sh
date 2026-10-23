@@ -36,6 +36,28 @@ fi
 command -v git >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || { $SUDO apt-get update -qq; $SUDO apt-get install -y -qq git openssl curl; }
 DOCKER="docker"; docker info >/dev/null 2>&1 || DOCKER="$SUDO docker"
 
+say "Container network"
+# The portal, Caddy (certificates) and the backend venv all need internet from inside containers.
+probe() { $DOCKER run --rm python:3.11-slim-bookworm python -c \
+  "import urllib.request; urllib.request.urlopen('https://deb.debian.org', timeout=15)" >/dev/null 2>&1; }
+if ! probe; then
+  if ! $SUDO test -s /etc/docker/daemon.json; then
+    echo "Containers can't resolve names; pointing Docker at public DNS (8.8.8.8, 1.1.1.1) and retrying."
+    echo '{"dns": ["8.8.8.8", "1.1.1.1"]}' | $SUDO tee /etc/docker/daemon.json >/dev/null
+    $SUDO systemctl restart docker
+  fi
+  if ! probe; then
+    echo "Containers still can't reach https://deb.debian.org. Share this output when asking for help:" >&2
+    { echo "--- host resolv.conf"; cat /etc/resolv.conf; echo "--- routes"; ip -4 route
+      echo "--- daemon.json"; $SUDO cat /etc/docker/daemon.json 2>/dev/null
+      echo "--- inside a container"
+      $DOCKER run --rm python:3.11-slim-bookworm sh -c 'cat /etc/resolv.conf; getent hosts deb.debian.org || echo "DNS failed"'
+    } >&2
+    exit 1
+  fi
+fi
+echo "containers reach the internet"
+
 say "Kernel setting SonarQube needs"
 echo 'vm.max_map_count=524288' | $SUDO tee /etc/sysctl.d/99-sonarqube.conf >/dev/null
 $SUDO sysctl -q -w vm.max_map_count=524288
