@@ -57,14 +57,23 @@ services:
       AUTH_URL: https://${GGOPS_DOMAIN:-ggops.localhost}
     restart: unless-stopped
 
-  # GG-Ops's one scheduled job, as vercel.json has it: recurring tasks, daily at 01:00 UTC, with its CRON_SECRET.
+  # GG-Ops's scheduled jobs, with its CRON_SECRET: recurring tasks daily at 01:00 UTC (as vercel.json has it), and
+  # every 5 minutes its job queue, so emails (and other jobs) whose first send failed are retried.
   ggops-cron:
     image: alpine:3.20
     profiles: [ggops]
     env_file:
       - path: ${GGOPS_DIR:-../GG-ops}/my-app/.env.production
         required: false
-    command: ["sh", "-c", "echo \"0 1 * * * wget -q -O /dev/null --header 'Authorization: Bearer $$CRON_SECRET' http://ggops:3000/api/cron/recurring-tasks\" | crontab - && exec crond -f -l 6"]
+    command:
+      - sh
+      - -c
+      - |
+        cat > /etc/crontabs/root <<EOF
+        0 1 * * * wget -q -O /dev/null --header "Authorization: Bearer $$CRON_SECRET" http://ggops:3000/api/cron/recurring-tasks
+        */5 * * * * wget -q -O /dev/null --header "Authorization: Bearer $$CRON_SECRET" http://ggops:3000/api/cron/jobs
+        EOF
+        exec crond -f -l 6
     depends_on: [ggops]
     restart: unless-stopped
 

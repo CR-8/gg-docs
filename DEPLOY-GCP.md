@@ -96,7 +96,14 @@ resolves (`dig +short portal.example.com`), run `DOMAIN=portal.example.com bash 
 GitHub App's four URLs to the new name.
 
 **Email invites** (optional): pass `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD` and `SMTP_FROM` to `install.sh`. Google
-Cloud blocks outgoing port 25, so use your provider's port 587 (the default) or 465.
+Cloud blocks outgoing port 25, so use your provider's port 587 (the default) or 465. With Resend, the same account
+GG-Ops sends from:
+
+```bash
+SMTP_HOST=smtp.resend.com SMTP_USER=resend SMTP_PASSWORD=re_your_api_key SMTP_FROM='GG <noreply@your-verified-domain>' bash install.sh VM_IP
+```
+
+Resend sends only from a domain verified in its dashboard (Domains), so `SMTP_FROM` must use that domain.
 
 **A local model** (optional, 16 GB VM): `LOCAL_LLM=auto bash install.sh VM_IP` (README 3.2). Otherwise pick a hosted
 model in Settings after signing in.
@@ -200,7 +207,7 @@ cd ~/gg-portal && GGOPS_DIR=~/GG-ops bash install.sh VM_IP
 It builds GG-Ops with its Dockerfile, adds `ggops.<ip-with-dashes>.sslip.io` to Caddy, points this portal's
 `GGOPS_URL` at it, sets GG-Ops's `AUTH_URL` to `https://ggops.<ip-with-dashes>.sslip.io` (Google sign-in returns
 there; an `AUTH_URL` in `.env.production` is overridden), and starts a small cron container that calls GG-Ops's recurring-tasks job daily at 01:00 UTC, as
-`vercel.json` did. `GGOPS_DIR` stays in `.env`, so later runs of `install.sh` keep GG-Ops and update it too.
+`vercel.json` did, and its job queue every 5 minutes, so emails whose first send failed are retried. `GGOPS_DIR` stays in `.env`, so later runs of `install.sh` keep GG-Ops and update it too.
 
 **4. Connect gg-docs to it** (for Settings → Your GG-Ops account). Register gg-docs once in GG-Ops:
 
