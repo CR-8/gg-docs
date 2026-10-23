@@ -136,7 +136,8 @@ def run_review(repo, *, pr=0, branch="", title, author, base, head, diff_base, h
     for chunk in chunks:
         conv = llm.Conversation(SYSTEM)
         conv.add_user(f"{header}\n\n<diff>\n{chunk}\n</diff>")
-        data = parse_json(conv.step().text)
+        with llm.background():  # Ask goes first
+            data = parse_json(conv.step().text)
         # Small local models sometimes answer in prose; say so rather than store what looks like a clean review.
         summaries.append(str(data.get("summary", "")) if data else
                          "(The model's answer for part of this diff was not valid JSON, so that part has no findings.)")

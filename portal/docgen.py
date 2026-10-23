@@ -538,7 +538,8 @@ def facts(a, kind, c=None):
 def write_prose(kind, context):
     conv = llm.Conversation(SYSTEM)
     conv.add_user(f"{ASK[kind]}\n\n<facts>\n{context}\n</facts>")
-    text = conv.step().text.strip()
+    with llm.background():  # Ask goes first
+        text = conv.step().text.strip()
     text = re.sub(r"^```(?:markdown|md)?\s*\n(.*)\n```$", r"\1", text, flags=re.S)  # some models fence everything
     return re.sub(r"^#\s+[^\n]*\n+", "", text).strip()  # we add the title
 

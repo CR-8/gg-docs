@@ -4,6 +4,8 @@ own base URL, key and model. Conversation keeps each provider's native message l
 (including Claude's thinking blocks) go back to the API unchanged inside a tool loop."""
 import json
 import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import httpx
@@ -85,8 +87,34 @@ def parse_args(raw):
         return {}
 
 
+# Ask goes first. A local model answers one or two requests at a time, so documentation and reviews (background)
+# send one request at a time and start none while someone is waiting for an answer in Ask.
+_cond, _chatting, _background = threading.Condition(), 0, threading.Lock()
+
+
+@contextmanager
+def interactive():
+    global _chatting
+    with _cond:
+        _chatting += 1
+    try:
+        yield
+    finally:
+        with _cond:
+            _chatting -= 1
+            _cond.notify_all()
+
+
+@contextmanager
+def background():
+    with _background:
+        with _cond:  # ponytail: waits at most 15 min, so a stuck chat can't stop docs and reviews for good
+            _cond.wait_for(lambda: _chatting == 0, timeout=900)
+        yield
+
+
 class Conversation:
-    def __init__(self, system, cfg=None):
+    def __init__(self, system, cfg=None, timeout=TIMEOUT, retries=3):
         self.cfg = cfg or config()
         if not usable(self.cfg):
             raise LLMError("No LLM is configured. An admin can set one in Settings.")
@@ -95,11 +123,12 @@ class Conversation:
         base_url = self.cfg.get("llm_base_url") or None
         if self.kind == "anthropic":
             import anthropic
-            self.client = anthropic.Anthropic(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=3, timeout=TIMEOUT)
+            self.client = anthropic.Anthropic(api_key=self.cfg["llm_api_key"], base_url=base_url, max_retries=retries,
+                                              timeout=timeout)
         else:
             import openai  # the SDK insists on a key; local servers ignore it
-            self.client = openai.OpenAI(api_key=self.cfg["llm_api_key"] or "none", base_url=base_url, max_retries=3,
-                                        timeout=TIMEOUT)
+            self.client = openai.OpenAI(api_key=self.cfg["llm_api_key"] or "none", base_url=base_url,
+                                        max_retries=retries, timeout=timeout)
 
     def add_user(self, text):
         self.messages.append({"role": "user", "content": text})
@@ -156,8 +185,25 @@ class Conversation:
         return Reply(msg.content or "", calls)
 
 
+NOOP = {"name": "noop", "description": "Does nothing. Do not call it.", "parameters": {"type": "object", "properties": {}}}
+
+
 def ping(cfg):
-    """Settings 'Test' button: one tiny request with the given (unsaved) config."""
-    conv = Conversation("Reply with the single word OK.", cfg)
+    """Settings 'Test' button: one tiny request with the given (unsaved) config. It offers a tool, because Ask needs
+    tool calling and some servers or models reject tools outright; that should show up here, not in Ask."""
+    conv = Conversation("Reply with the single word OK.", cfg, timeout=120, retries=0)
     conv.add_user("ping")
-    return conv.step().text.strip()[:200]
+    try:
+        reply = conv.step([NOOP])
+    except LLMError:  # no tools: fine for reviews and docs, not for Ask; a broken endpoint still raises below
+        return {"reply": conv.step().text.strip()[:200], "tools": False}
+    return {"reply": (reply.text.strip() or "(answered with a tool call)")[:200], "tools": True}
+
+
+def models(cfg):
+    """Model ids the endpoint offers (Settings 'Load models'); both SDKs page through them."""
+    conv = Conversation("", cfg, timeout=30, retries=0)
+    try:
+        return sorted(m.id for m in conv.client.models.list())[:1000]
+    except Exception as e:
+        raise LLMError(f"{type(e).__name__}: {e}") from e

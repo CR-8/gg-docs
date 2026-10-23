@@ -100,7 +100,8 @@ done
 LLM_TAG=""
 if [ "${LOCAL_LLM:-}" = "off" ]; then
   setkv COMPOSE_PROFILES https
-  for k in LLM_KIND LLM_BASE_URL LLM_MODEL LLM_API_KEY LLM_TIMEOUT REVIEW_CHUNK_CHARS REVIEW_MAX_CHARS CHAT_TOOL_CHARS DOCS_CONTEXT_CHARS; do
+  for k in LLM_KIND LLM_BASE_URL LLM_MODEL LLM_API_KEY LLM_TIMEOUT REVIEW_CHUNK_CHARS REVIEW_MAX_CHARS CHAT_TOOL_CHARS DOCS_CONTEXT_CHARS \
+           CHAT_TIMEOUT LLM_PARALLEL; do
     setkv "$k" ""
   done
 elif [ -n "${LOCAL_LLM:-}" ]; then
@@ -127,6 +128,8 @@ elif [ -n "${LOCAL_LLM:-}" ]; then
   setkv REVIEW_CHUNK_CHARS $(( (ctx - 4000) * 3 ))                 # leave room for instructions and the answer
   setkv REVIEW_MAX_CHARS $(( (ctx - 4000) * 12 ))
   setkv CHAT_TOOL_CHARS 6000
+  setkv CHAT_TIMEOUT 900                                            # a whole answer, all its lookups included
+  setkv LLM_PARALLEL "$([ "$ram_gb" -ge 12 ] && echo 2 || echo 1)"   # a second slot (Ask never waits) needs the RAM
   setkv DOCS_CONTEXT_CHARS $(( (ctx - 5000) * 3 ))                # code facts per documentation request
 fi
 fill COMPOSE_PROFILES https

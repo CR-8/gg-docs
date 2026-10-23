@@ -22,6 +22,22 @@ const Field = ({ id, label, hint, children }: { id: string; label: string; hint?
   </div>
 )
 
+// OpenAI-compatible endpoints people use most; one click fills the base URL
+const PRESETS: [string, string][] = [
+  ["OpenAI", "https://api.openai.com/v1"], ["NVIDIA", "https://integrate.api.nvidia.com/v1"],
+  ["OpenRouter", "https://openrouter.ai/api/v1"], ["Groq", "https://api.groq.com/openai/v1"], ["Mistral", "https://api.mistral.ai/v1"],
+]
+
+function ModelInput(props: { id: string; value: string; onChange: (v: string) => void; placeholder: string; list: string[]; onLoad: () => void }) {
+  return (
+    <div className="flex gap-2">
+      <Input id={props.id} value={props.value} onChange={(e) => props.onChange(e.target.value)} placeholder={props.placeholder} list={`${props.id}-list`} />
+      <datalist id={`${props.id}-list`}>{props.list.map((m) => <option key={m} value={m} />)}</datalist>
+      <Button type="button" variant="outline" size="sm" className="h-8 shrink-0" onClick={props.onLoad}>Load models</Button>
+    </div>
+  )
+}
+
 const Note = ({ children }: { children: ReactNode }) => <span className="text-muted-foreground text-sm">{children}</span>
 
 function StatusPanel({ admin }: { admin: boolean }) {
@@ -234,11 +250,24 @@ export function Settings() {
     post_reviews: postReviews,
     sonar_token: sonar,
   })
+  const [modelList, setModelList] = useState<string[]>([])
+  const loadModels = async () => {
+    setMsg({ text: "Asking the endpoint which models it has…", busy: true })
+    try {
+      const r = await post<{ models: string[] }>("/api/settings/models", body())
+      setModelList(r.models)
+      setMsg({ ok: true, text: `${r.models.length} models: pick one in the Model field.` })
+    } catch (e: any) {
+      setMsg({ ok: false, text: e.message })
+    }
+  }
   const test = async () => {
     setMsg({ text: "Sending a one-word request…", busy: true })
     try {
       const r = await post("/api/settings/test", body())
-      setMsg({ ok: r.ok, text: r.ok ? `Works. The model replied “${r.reply}”.` : r.reply })
+      setMsg(!r.ok ? { ok: false, text: r.reply }
+        : r.tools ? { ok: true, text: `Works, tool calls included (Ask needs them). Reply: “${r.reply}”.` }
+        : { ok: false, text: "It answers, so reviews and docs work, but this model refuses tool calls, so Ask can't use it. Pick a model with tool calling." })
     } catch (e: any) {
       setMsg({ ok: false, text: e.message })
     }
@@ -301,7 +330,7 @@ export function Settings() {
                       <Input id="a-key" type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} />
                     </Field>
                     <Field id="a-model" label="Model">
-                      <Input id="a-model" value={model.anthropic} onChange={(e) => setM(e.target.value)} placeholder={DEFAULT_MODEL.anthropic} />
+                      <ModelInput id="a-model" value={model.anthropic} onChange={setM} placeholder={DEFAULT_MODEL.anthropic} list={modelList} onLoad={loadModels} />
                     </Field>
                     <Field id="a-effort" label="Effort" hint="Choose “Don't send” for models or gateways that reject it.">
                       <Choice label="Effort" value={effort} onChange={setEffort}
@@ -313,11 +342,17 @@ export function Settings() {
                   </TabsContent>
 
                   <TabsContent value="openai" className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <Field id="o-base" label="Base URL" hint="OpenAI, a gateway, or your own server (vLLM, llama.cpp, LM Studio); usually ends in /v1.">
+                    <Field id="o-base" label="Base URL" hint={
+                      <span className="flex flex-wrap items-center gap-1">
+                        {PRESETS.map(([name, url]) => (
+                          <button key={name} type="button" onClick={() => setBase(url)} className="hover:text-foreground rounded border px-1.5 py-0.5">{name}</button>
+                        ))}
+                        <span>or your own server (vLLM, llama.cpp, LM Studio).</span>
+                      </span>}>
                       <Input id="o-base" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://api.openai.com/v1" />
                     </Field>
-                    <Field id="o-model" label="Model">
-                      <Input id="o-model" value={model.openai} onChange={(e) => setM(e.target.value)} placeholder="gpt-5" />
+                    <Field id="o-model" label="Model" hint="Load models lists what this endpoint and key offer. Ask needs a model with tool calling.">
+                      <ModelInput id="o-model" value={model.openai} onChange={setM} placeholder="e.g. meta/llama-3.3-70b-instruct" list={modelList} onLoad={loadModels} />
                     </Field>
                     <Field id="o-key" label="API key" hint={`${keyHint} Not needed for a server of your own.`}>
                       <Input id="o-key" type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} />

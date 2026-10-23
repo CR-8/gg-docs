@@ -17,6 +17,7 @@ from .sync import sonar_token
 
 MAX_ROUNDS = 10
 MAX_OUT = int(os.environ.get("CHAT_TOOL_CHARS") or 20000)  # per tool result; smaller for a local model's context
+CHAT_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT") or 300)  # seconds for a whole answer (install.sh: more for CPU)
 
 SYSTEM = """You are the GeneGenius engineering portal assistant. You answer questions about two repositories:
 the backend {backend} (FastAPI) and the frontend {frontend} (Next.js): who pushed what, whose push broke CI,
@@ -237,24 +238,30 @@ def run_tool(name, args, limit=MAX_OUT):
 def answer(history, question):
     """history: earlier [{role: user|assistant, content: text}] from the browser (text only, so no stale
     thinking blocks are ever replayed). Returns the answer plus the tool calls made, for the UI."""
-    conv = llm.Conversation(SYSTEM.format(backend=BACKEND_REPO, frontend=FRONTEND_REPO,
-                                          today=date.today().isoformat(), schema=db.schema_text()))
+    deadline = time.monotonic() + CHAT_TIMEOUT
+    conv = llm.Conversation(SYSTEM.format(backend=BACKEND_REPO, frontend=FRONTEND_REPO, today=date.today().isoformat(),
+                                          schema=db.schema_text()), timeout=CHAT_TIMEOUT, retries=1)
     for m in history[-20:]:
         if m.get("role") == "user":
             conv.add_user(str(m.get("content", ""))[:8000])
         elif m.get("role") == "assistant" and conv.messages:
             conv.add_assistant_text(str(m.get("content", ""))[:8000])
     conv.add_user(question[:8000])
-    steps = []
-    for _ in range(MAX_ROUNDS):
-        reply = conv.step(TOOLS)
-        if not reply.tool_calls:
-            return {"answer": reply.text, "steps": steps}
-        results = []
-        for call in reply.tool_calls:
-            out = run_tool(call.name, call.args)
-            steps.append({"tool": call.name, "input": call.args, "output": out[:1500]})
-            results.append((call.id, out))
-        conv.add_tool_results(results)
+    steps, reply = [], None
+    with llm.interactive():  # documentation and reviews wait while someone is asking
+        for _ in range(MAX_ROUNDS):
+            if time.monotonic() > deadline:
+                return {"answer": f"I ran out of time ({int(CHAT_TIMEOUT)} s) after {len(steps)} lookups. A local CPU "
+                                  "model is slow with questions that need many lookups: try a narrower question, or "
+                                  "a hosted model in Settings.", "steps": steps}
+            reply = conv.step(TOOLS)
+            if not reply.tool_calls:
+                return {"answer": reply.text, "steps": steps}
+            results = []
+            for call in reply.tool_calls:
+                out = run_tool(call.name, call.args)
+                steps.append({"tool": call.name, "input": call.args, "output": out[:1500]})
+                results.append((call.id, out))
+            conv.add_tool_results(results)
     return {"answer": reply.text or "I stopped after 10 lookups without a final answer; try a narrower question.",
             "steps": steps}

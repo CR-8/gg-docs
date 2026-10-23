@@ -50,7 +50,7 @@ services:
     environment:
       OLLAMA_CONTEXT_LENGTH: ${LLM_CONTEXT:-16384}
       OLLAMA_KEEP_ALIVE: 24h        # keep the model in RAM between requests
-      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_NUM_PARALLEL: ${LLM_PARALLEL:-1}   # 2 keeps a slot free for Ask; install.sh sets it from the RAM
       OLLAMA_MAX_LOADED_MODELS: "1"
     volumes: ["${OLLAMA_DIR:-ollama}:/root/.ollama"]   # OLLAMA_DIR: a host Ollama's store, reused (install.sh)
     restart: unless-stopped

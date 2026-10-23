@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
-import { ArrowUp, RotateCcw } from "lucide-react"
-import { post, useApi } from "@/lib/api"
+import { ArrowUp, RotateCcw, Square } from "lucide-react"
+import { api, useApi } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Spinner } from "@/components/kibo-ui/spinner"
@@ -28,7 +28,15 @@ export function Ask() {
   })
   const [text, setText] = useState("")
   const [busy, setBusy] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const stop = useRef<AbortController | null>(null)
   const end = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!busy) return
+    const started = Date.now()
+    const t = setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(t)
+  }, [busy])
   useEffect(() => {
     try {
       sessionStorage.setItem(KEY, JSON.stringify(log))
@@ -42,12 +50,18 @@ export function Ask() {
     const history = log.filter((m) => !m.error).map(({ role, content }) => ({ role, content }))
     setLog((l) => [...l, { role: "user", content: question }])
     setText("")
+    setElapsed(0)
     setBusy(true)
+    summary.reload() // is the docs writer using the model right now?
+    stop.current = new AbortController()
     try {
-      const r = await post("/api/chat", { history, question })
+      const r = await api("/api/chat", { method: "POST", body: JSON.stringify({ history, question }), signal: stop.current.signal })
       setLog((l) => [...l, { role: "assistant", content: r.answer, steps: r.steps }])
     } catch (e: any) {
-      setLog((l) => [...l, { role: "assistant", content: e.message, error: true }])
+      const text = e.name === "AbortError" ? "Stopped." : /timed? ?out/i.test(e.message)
+        ? `The model didn't answer in time (${e.message}). A local CPU model is slow; a hosted model in Settings answers in seconds.`
+        : e.message
+      setLog((l) => [...l, { role: "assistant", content: text, error: true }])
     }
     setBusy(false)
   }
@@ -95,8 +109,14 @@ export function Ask() {
           )
         )}
         {busy && (
-          <div className="text-muted-foreground flex items-center gap-2 text-sm">
-            <Spinner variant="ellipsis" className="size-5" /> Looking it up…
+          <div className="text-muted-foreground space-y-1 text-sm">
+            <div className="flex items-center gap-2">
+              <Spinner variant="ellipsis" className="size-5" /> Looking it up… <span className="tabular-nums">{elapsed} s</span>
+              <Button variant="ghost" size="xs" onClick={() => stop.current?.abort()}><Square /> Stop</Button>
+            </div>
+            {elapsed > 20 && s?.docs_writing && (
+              <p className="text-xs">The model is also writing documentation right now; it pauses between documents so this question goes first.</p>
+            )}
           </div>
         )}
         <div ref={end} />

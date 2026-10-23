@@ -188,7 +188,7 @@ def summary():
     return {"ci": ci, "sonar_url": SONAR_PUBLIC_URL or None,
             "open_breakages": db.q("SELECT COUNT(*) n FROM breakages WHERE fixed_sha IS NULL")[0]["n"],
             "worker": sync.status(), "github": gh.mode, "llm": llm.configured(), "llm_model": llm.config()["llm_model"],
-            "repos": REPOS, "extra_repos": db.setting("extra_repos", []),
+            "repos": REPOS, "extra_repos": db.setting("extra_repos", []), "docs_writing": bool(docgen.STATUS),
             "sync_error": last_sync[0]["detail"] if last_sync and not last_sync[0]["ok"] else None}
 
 
@@ -367,9 +367,20 @@ async def test_settings(request: Request):
     require_admin(request)
     cfg = merged_settings(await request.json())
     try:
-        return {"ok": True, "reply": await run_in_threadpool(llm.ping, cfg)}
+        return {"ok": True, **await run_in_threadpool(llm.ping, cfg)}
     except llm.LLMError as e:
         return {"ok": False, "reply": str(e)}
+
+
+@app.post("/api/settings/models")
+async def list_models(request: Request):
+    """Model ids the endpoint in the form offers (NVIDIA, OpenRouter and the like have hundreds)."""
+    require_admin(request)
+    cfg = merged_settings(await request.json())
+    try:
+        return {"models": await run_in_threadpool(llm.models, cfg)}
+    except llm.LLMError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
 
 
 @app.get("/api/settings/local")

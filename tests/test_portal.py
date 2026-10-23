@@ -236,3 +236,20 @@ def test_generated_docs_follow_the_code():
     services = next(r for r in rows if r["slug"] == "modules/services")
     assert services["summary"] == "Written for module." and services["content"].index("Written for") < services["content"].index("## Reference")
     REPOS.remove(repo)
+
+
+def test_ask_goes_before_background_work():
+    import threading
+    from portal import llm
+    entered = threading.Event()
+
+    def background_request():
+        with llm.background():
+            entered.set()
+
+    with llm.interactive():
+        t = threading.Thread(target=background_request)
+        t.start()
+        assert not entered.wait(0.3)  # documentation and reviews wait while someone is asking
+    assert entered.wait(2)
+    t.join()
