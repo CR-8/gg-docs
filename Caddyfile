@@ -1,3 +1,8 @@
 {$DOMAIN} {
 	reverse_proxy portal:7000
 }
+
+# GG-Ops on the same server (the ggops profile in docker-compose.yml)
+{$GGOPS_DOMAIN} {
+	reverse_proxy ggops:3000
+}

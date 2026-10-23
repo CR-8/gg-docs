@@ -13,6 +13,9 @@
 # Run a coder model on this VM for reviews and the chatbot (Ollama, Qwen2.5-Coder Q8 sized to the RAM):
 #   LOCAL_LLM=auto bash install.sh 35.253.245.77        # or an Ollama tag, e.g. qwen2.5-coder:7b-instruct-q8_0
 #   LOCAL_LLM=off  bash install.sh 35.253.245.77        # switch it off again
+# GG-Ops on the same server, at https://ggops.<DOMAIN>, from a GG-ops checkout with its settings in
+# my-app/.env.production (DEPLOY-GCP.md):
+#   GGOPS_DIR=~/GG-ops bash install.sh 35.253.245.77
 set -euo pipefail
 
 IP="${1:-${PUBLIC_IP:-}}"
@@ -130,6 +133,22 @@ fi
 fill COMPOSE_PROFILES https
 # A plain re-run keeps the local model and finishes a download an earlier run didn't.
 if [ -z "$LLM_TAG" ] && [[ "$(getkv COMPOSE_PROFILES)" == *llm* ]]; then LLM_TAG="$(getkv LLM_MODEL)"; fi
+# GG-Ops: once given, GGOPS_DIR stays in .env, so later runs keep (and update) it
+if [ -n "${GGOPS_DIR:-}" ]; then
+  [ -d "${GGOPS_DIR/#\~/$HOME}" ] || { echo "GGOPS_DIR: no folder at $GGOPS_DIR" >&2; exit 1; }
+  setkv GGOPS_DIR "$(cd "${GGOPS_DIR/#\~/$HOME}" && pwd)"
+fi
+GGOPS_DIR="$(getkv GGOPS_DIR)"
+if [ -n "$GGOPS_DIR" ]; then
+  ggenv="$GGOPS_DIR/my-app/.env.production"
+  [ -f "$ggenv" ] || { echo "GG-Ops: put its settings in $ggenv first (start from my-app/.env.example)" >&2; exit 1; }
+  if [ -d "$GGOPS_DIR/.git" ]; then git -C "$GGOPS_DIR" pull --ff-only || echo "(GG-Ops not updated: local changes or diverged history)"; fi
+  setkv GGOPS_DOMAIN "ggops.$DOMAIN"
+  setkv GGOPS_URL "https://ggops.$DOMAIN"                          # the GG-Ops this portal connects to
+  [[ ",$(getkv COMPOSE_PROFILES)," == *,ggops,* ]] || setkv COMPOSE_PROFILES "$(getkv COMPOSE_PROFILES),ggops"
+  grep -q "^APP_URL=https://ggops.$DOMAIN/\?$" "$ggenv" || echo "GG-Ops: set APP_URL=https://ggops.$DOMAIN in $ggenv"
+  echo "GG-Ops from $GGOPS_DIR at https://ggops.$DOMAIN"
+fi
 chmod 600 .env
 
 say "GitHub App private key (optional)"
@@ -177,6 +196,7 @@ cat <<EOF
 Portal     https://$DOMAIN   (Continue with GitHub, create a workspace, import repositories)
 MCP        each workspace has its own: Settings -> Connect a coding agent
 EOF
+if [ -n "$GGOPS_DIR" ]; then echo "GG-Ops     https://ggops.$DOMAIN"; fi
 if [ -n "$(getkv SMTP_HOST)" ]; then echo "Invites    emailed through $(getkv SMTP_HOST)"
 else echo "Invites    no SMTP_HOST, so people copy invite links from Settings"; fi
 if [ -n "$LLM_TAG" ]; then

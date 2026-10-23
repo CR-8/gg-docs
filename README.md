@@ -630,7 +630,7 @@ Settings can override all of this at any time. Pointing it at a hosted model (Cl
 
 Keep the VM's public IP **static** (an Elastic IP on AWS, or "reserve static address" on GCP). If it changes, the sslip.io name changes with it; re-run the script and update the App's URLs. To use a real domain instead, point it at the VM and run `DOMAIN=portal.example.com bash install.sh <ip>`.
 
-Step by step on a Google Cloud VM you reach over SSH: [DEPLOY-GCP.md](DEPLOY-GCP.md).
+Step by step on a Google Cloud VM you reach over SSH, with GG-Ops on the same VM if you want it: [DEPLOY-GCP.md](DEPLOY-GCP.md).
 
 The manual steps below do the same thing by hand.
 

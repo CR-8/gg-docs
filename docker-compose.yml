@@ -2,6 +2,7 @@
 # Optional parts are profiles, switched on with COMPOSE_PROFILES in .env (install.sh sets it):
 #   https - Caddy serves https://DOMAIN with an automatic certificate
 #   llm   - a local coder model (Ollama) the portal uses for reviews and the chatbot
+#   ggops - GG-Ops on the same server, at https://GGOPS_DOMAIN (install.sh GGOPS_DIR=..., DEPLOY-GCP.md)
 name: gg-portal
 services:
   portal:
@@ -42,11 +43,35 @@ services:
     volumes: ["${OLLAMA_DIR:-ollama}:/root/.ollama"]   # OLLAMA_DIR: a host Ollama's store, reused (install.sh)
     restart: unless-stopped
 
+  # Optional GG-Ops (profile "ggops"): the Next.js app of a GG-ops checkout (GGOPS_DIR), built with its Dockerfile.
+  # Its settings are that checkout's my-app/.env.production; install.sh checks the file is there.
+  ggops:
+    build: ${GGOPS_DIR:-../GG-ops}/my-app
+    profiles: [ggops]
+    env_file:
+      - path: ${GGOPS_DIR:-../GG-ops}/my-app/.env.production
+        required: false
+    environment:
+      AUTH_TRUST_HOST: "true"   # Auth.js behind Caddy: use the forwarded host
+    restart: unless-stopped
+
+  # GG-Ops's one scheduled job, as vercel.json has it: recurring tasks, daily at 01:00 UTC, with its CRON_SECRET.
+  ggops-cron:
+    image: alpine:3.20
+    profiles: [ggops]
+    env_file:
+      - path: ${GGOPS_DIR:-../GG-ops}/my-app/.env.production
+        required: false
+    command: ["sh", "-c", "echo \"0 1 * * * wget -q -O /dev/null --header 'Authorization: Bearer $$CRON_SECRET' http://ggops:3000/api/cron/recurring-tasks\" | crontab - && exec crond -f -l 6"]
+    depends_on: [ggops]
+    restart: unless-stopped
+
   caddy:
     image: caddy:2.8-alpine
     profiles: [https]
     environment:
       DOMAIN: ${DOMAIN:-}
+      GGOPS_DOMAIN: ${GGOPS_DOMAIN:-http://ggops.localhost}   # without GG-Ops: a plain-HTTP local name, no certificate
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

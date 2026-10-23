@@ -153,7 +153,64 @@ Keep the `.env` copy from step 3 apart from these.
   values *before* migrating. On `mvp` they default to `your-org`, `your-org/backend` and `your-org/frontend`, which
   would name the workspace and its repositories wrongly.
 
-## 9. Troubleshooting
+## 9. GG-Ops on the same VM
+
+GG-Ops (the `chore/optimization-pass` branch of GG-ops) runs as one more container of the same stack, at
+`https://ggops.<ip-with-dashes>.sslip.io`. sslip.io resolves any name in front of the IP, so the stack's Caddy gets
+a second certificate and sends that name to GG-Ops; gg-docs stays at `https://<ip-with-dashes>.sslip.io`.
+
+**1. Get the code onto the VM.** The GG-ops repository is private, so copy the branch up as a bundle:
+
+```bash
+# on your machine
+cd "/d/Pratyush Tiwari/GG-ops" && git bundle create ~/ggops.bundle chore/optimization-pass && scp ~/ggops.bundle user@VM_IP:~/
+```
+
+```bash
+# on the VM
+git clone -b chore/optimization-pass ~/ggops.bundle ~/GG-ops
+```
+
+A VM with read access to the repository can clone the branch from GitHub instead, once the branch there has the
+Dockerfile (`my-app/Dockerfile`).
+
+**2. Its settings.** Put GG-Ops's production settings (the ones it has on Vercel today) in
+`~/GG-ops/my-app/.env.production`, starting from `my-app/.env.example`. GG-Ops checks them when it starts:
+`MONGODB_URI`, `AUTH_SECRET`, the Google sign-in pair, `CRON_SECRET`, all six Pusher values, Upstash Redis, an upload
+provider and email must all be there. For this server:
+
+- `APP_URL=https://ggops.<ip-with-dashes>.sslip.io`
+- In Google Cloud → APIs & Services → Credentials, add
+  `https://ggops.<ip-with-dashes>.sslip.io/api/auth/callback/google` to the OAuth client's redirect URIs.
+- Keep `MONGODB_URI` on Atlas: GG-Ops uses transactions, which need a replica set, and this stack's MongoDB is a
+  single node.
+
+**3. Install** (on the VM):
+
+```bash
+cd ~/gg-portal && GGOPS_DIR=~/GG-ops bash install.sh VM_IP
+```
+
+It builds GG-Ops with its Dockerfile, adds `ggops.<ip-with-dashes>.sslip.io` to Caddy, points this portal's
+`GGOPS_URL` at it, and starts a small cron container that calls GG-Ops's recurring-tasks job daily at 01:00 UTC, as
+`vercel.json` did. `GGOPS_DIR` stays in `.env`, so later runs of `install.sh` keep GG-Ops and update it too.
+
+**4. Connect gg-docs to it** (for Settings → Your GG-Ops account). Register gg-docs once in GG-Ops:
+
+```bash
+curl -s -X POST https://ggops.<ip-with-dashes>.sslip.io/oauth/register -H 'content-type: application/json' -d '{"client_name":"GG-Docs","redirect_uris":["https://<ip-with-dashes>.sslip.io/connect/ggops/callback"]}'
+```
+
+Put the `client_id` it returns in `~/gg-portal/.env` as `GGOPS_CLIENT_ID=...`, then
+`cd ~/gg-portal && docker compose up -d`.
+
+**Updating GG-Ops:** make a new bundle, `scp` it over `~/ggops.bundle`, and re-run `install.sh`. A changed Pusher key
+needs that rebuild too, since the browser code has it built in.
+
+**Turning it off:** delete `GGOPS_DIR` and `GGOPS_DOMAIN` from `~/gg-portal/.env`, take `ggops` out of
+`COMPOSE_PROFILES`, then `docker compose up -d --remove-orphans`.
+
+## 10. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
@@ -162,5 +219,7 @@ Keep the `.env` copy from step 3 apart from these.
 | The address changed after a restart | The external IP was ephemeral: promote it to static (step 1) and re-run `install.sh` |
 | The build is killed, or the VM freezes | Not enough memory: 8 GB at least, 16 GB with a local model (step 1) |
 | `permission denied` on `docker` | Log out and SSH in again after the first install (step 3) |
+| GG-Ops keeps restarting | A production setting is missing: `docker compose logs ggops` names it. Fix `.env.production`, then `docker compose up -d ggops` |
+| Google sign-in on GG-Ops says `redirect_uri_mismatch` | Add the redirect URI from section 9, step 2 |
 | Invites never arrive | Port 25 is blocked on Google Cloud: use port 587 or 465 |
 | Anything else | README 6, Troubleshooting |
