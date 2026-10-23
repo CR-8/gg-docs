@@ -365,12 +365,22 @@ use the portal: Claude Code, Codex, ChatGPT (developer mode), Mistral Le Chat, C
 the chatbot's tools (1.9) with larger results: PRs being worked on and updated, reviews and findings, pushes and CI,
 breakages, people, the code graph, and the generated documentation. Its instructions explain every table.
 
-- **Read-only** and stateless: every request is one JSON-RPC call answered with JSON, so there are no sessions to lose.
-- **Auth** decides which workspace the agent sees. Preferred: an **API client** with the `mcp:read` scope (1.16)
-  gets a one-hour token and sends it as `Authorization: Bearer <token>`. Still supported for clients already set up:
-  the workspace's own **legacy MCP token**, as that header or in the URL (`/mcp/<token>`) for clients that only take a
-  URL, such as ChatGPT and Le Chat (the URL is then a secret). It is stored encrypted; admins can make a new one
-  (the old one stops at once) or turn it off in Settings. Access tokens are never accepted in the URL.
+- **Stateless:** every request is one JSON-RPC call answered with JSON, so there are no sessions to lose. The portal's
+  own tools are read-only.
+- **Auth** decides who the agent is. Each member has a **personal MCP token** per workspace (Settings → Connect a
+  coding agent; made on first view, replaced with "New token", gone when they leave the workspace): an agent using it
+  *is* that person, as `Authorization: Bearer <token>` or in the URL (`/mcp/<token>`) for clients that only take a
+  URL, such as ChatGPT and Le Chat (the URL is then a secret). The workspace's **legacy MCP token** (same two forms;
+  admins can replace it or turn it off) and an **API client** with the `mcp:read` scope (1.16, a one-hour token, never
+  in the URL) are the workspace, with no person. Every token is stored encrypted and looked up by its digest.
+- **GG-Ops's tools, as the person.** An agent on a personal token whose person has connected their GG-Ops account
+  (1.16) also gets GG-Ops's own MCP tools, named `ggops_*` (list workspaces, projects and members, search tasks, read a
+  board, create, update, complete and comment on tasks, task drafts, DSRs). `tools/list` asks GG-Ops's MCP server
+  (`/api/mcp`) with that person's token, so GG-Ops shows only what their grant allows, and `tools/call` runs the tool
+  there as them: tasks are created as that person and GG-Ops sends its usual emails (task assigned, mentions,
+  comments). A call is sent once and never retried blind; only a token GG-Ops refuses is refreshed and the call sent
+  again. A connection made when the portal asked GG-Ops for `read` only has no write tools until the person chooses
+  **Allow task changes** (connect again). Workspace and API-client tokens get no GG-Ops tools.
 - **Settings → Connect a coding agent** shows the exact command or URL for each client, for example:
   ```bash
   claude mcp add --transport http gg https://<domain>/mcp --header "Authorization: Bearer <token>"
@@ -480,7 +490,7 @@ task counts, not task contents. Timeouts, bounded retries (3 attempts on connect
 revoked key shows up as status `unauthorized` instead of failing the page.
 
 **Your own GG-Ops account.** With `GGOPS_URL` and `GGOPS_CLIENT_ID` set, the portal is an OAuth client of GG-Ops
-(PKCE, scope `read`, no client secret) and people connect their own account: Settings → Your GG-Ops account, or
+(PKCE, scope `read write`, no client secret) and people connect their own account: Settings → Your GG-Ops account, or
 GG-Ops's "Open in GG-Docs" link to `/connect/ggops`. A person's workflow reads then go out with their own token, so
 they see what GG-Ops shows *them*, and someone who hasn't connected sees no GG-Ops data; API clients act as no person
 and keep the workspace's key. Tokens are stored encrypted per person; an access token is refreshed a minute before it

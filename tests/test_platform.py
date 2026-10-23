@@ -435,13 +435,13 @@ def ggops(monkeypatch):
     """GG-Ops's OAuth server and API as the portal meets them: the refresh token rotates on every use, and a second
     use of an old one revokes the whole grant (exchange-token.ts in GG-Ops)."""
     s = {"n": 0, "access": None, "refresh": None, "used": set(), "revoked": False, "challenge": None, "refreshes": 0,
-         "revokes": []}
+         "revokes": [], "scope": "read write", "mcp": []}
 
     def mint():
         s["n"] += 1
         s["access"], s["refresh"] = f"ggops_sk_a{s['n']}", f"r{s['n']}"
         return httpx.Response(200, json={"access_token": s["access"], "refresh_token": s["refresh"],
-                                         "token_type": "Bearer", "expires_in": 3600, "scope": "read"})
+                                         "token_type": "Bearer", "expires_in": 3600, "scope": s["scope"]})
 
     def found(data):
         return httpx.Response(200, json={"ok": True, "data": data})
@@ -470,6 +470,17 @@ def ggops(monkeypatch):
             return httpx.Response(200)
         if s["revoked"] or request.headers.get("authorization") != f"Bearer {s['access']}":
             return httpx.Response(401, json={"ok": False, "error": "Unauthorized"})
+        if path == "/api/mcp":  # GG-Ops's MCP server: tools filtered by the token's scopes, calls recorded
+            rpc = json.loads(request.content)
+            if rpc["method"] == "tools/list":
+                tools = [{"name": "list_projects", "description": "Projects", "inputSchema": {"type": "object"}}]
+                if "write" in s["scope"].split():
+                    tools.append({"name": "create_task", "description": "Create a task", "inputSchema": {"type": "object"}})
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": rpc["id"], "result": {"tools": tools}})
+            s["mcp"].append((rpc["params"]["name"], rpc["params"]["arguments"]))
+            text = json.dumps({"created": rpc["params"]["arguments"]})
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": rpc["id"],
+                                             "result": {"content": [{"type": "text", "text": text}], "isError": False}})
         if path == "/api/v1/me":
             return found({"id": "u1", "name": "Alice Ops", "email": "alice@acme.example"})
         if path == "/api/v1/workspaces":
@@ -488,9 +499,9 @@ def ggops(monkeypatch):
         db.workflows.delete({})
 
 
-def connect_ggops(c, s, **answer):
+def connect_ggops(c, s, start="/connect/ggops", **answer):
     """/connect/ggops, GG-Ops's consent (stubbed: approved, or `answer` overrides), the callback; where it lands."""
-    to = urlsplit(c.get("/connect/ggops", follow_redirects=False).headers["location"])
+    to = urlsplit(c.get(start, follow_redirects=False).headers["location"])
     if to.netloc != "ops.example.com":
         return to.path
     q = parse_qs(to.query)
@@ -513,7 +524,7 @@ def test_people_read_gg_ops_as_themselves(ggops):
         to = urlsplit(alice.get("/connect/ggops", follow_redirects=False).headers["location"])
         q = parse_qs(to.query)
         assert f"{to.scheme}://{to.netloc}{to.path}" == f"{OPS}/oauth/authorize"
-        assert q["client_id"] == ["mcp_test"] and q["scope"] == ["read"] and q["code_challenge_method"] == ["S256"]
+        assert q["client_id"] == ["mcp_test"] and q["scope"] == ["read write"] and q["code_challenge_method"] == ["S256"]
         assert q["redirect_uri"] == ["http://localhost:7000/connect/ggops/callback"]
 
         # not connected: no GG-Ops data at all, and no falling back to the workspace's key
@@ -564,6 +575,66 @@ def test_people_read_gg_ops_as_themselves(ggops):
         refresh = ggops["refresh"]
         assert alice.delete("/api/v1/integrations/gg-ops/me").json() == {"ok": True, "revoked_in_ggops": True}
         assert ggops["revokes"][-1] == refresh and db.ggops_connections.count_documents({}) == 0
+
+
+def test_mcp_agents_use_gg_ops_as_their_person(ggops):
+    """A person's own MCP token is them: GG-Ops's tools come along as ggops_*, run in GG-Ops with their token. A workspace
+    token is no person and gets none of it."""
+    def rpc(c, token, method, **params):
+        return c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                      headers={"Authorization": f"Bearer {token}"}).json()
+
+    def names(c, token):
+        return [t["name"] for t in rpc(c, token, "tools/list")["result"]["tools"]]
+
+    with client() as alice, client() as agent:
+        sign_in(alice, "alice")
+        mine = alice.get("/api/settings/mcp/me").json()
+        token, shared = mine["token"], alice.get("/api/settings/mcp").json()["token"]
+        assert alice.get("/api/settings/mcp/me").json()["token"] == token  # made once, then shown again
+        assert db.members.find_one({"mcp_token_hash": secret.digest(token)})["mcp_token"] != token  # sealed at rest
+        assert mine["ggops"] and not mine["ggops_connected"]
+
+        # not connected to GG-Ops: our tools only, and a ggops_ call says why
+        assert "query" in names(agent, token) and not [n for n in names(agent, token) if n.startswith("ggops_")]
+        assert "Connect your GG-Ops account" in rpc(agent, token, "tools/call", name="ggops_create_task",
+                                                    arguments={})["result"]["content"][0]["text"]
+
+        # connected read-only (before writes were asked for): reads only, and Settings says to connect again
+        ggops["scope"] = "read"
+        assert connect_ggops(alice, ggops) == "/settings/"
+        assert not alice.get("/api/settings/mcp/me").json()["ggops_write"]
+        assert [n for n in names(agent, token) if n.startswith("ggops_")] == ["ggops_list_projects"]
+
+        # connecting again grants write; the old grant is revoked in GG-Ops
+        ggops["scope"] = "read write"
+        old_refresh = ggops["refresh"]
+        assert alice.get("/connect/ggops", follow_redirects=False).headers["location"] == "/settings/"  # connected: straight in
+        assert connect_ggops(alice, ggops, start="/connect/ggops?again=1") == "/settings/" and old_refresh in ggops["revokes"]
+        assert alice.get("/api/settings/mcp/me").json()["ggops_write"]
+        assert {"ggops_list_projects", "ggops_create_task"} <= set(names(agent, token))
+        assert "ggops_*" in rpc(agent, token, "initialize", protocolVersion="2025-11-25")["result"]["instructions"]
+
+        # a call goes to GG-Ops once, as her, with GG-Ops's own name and arguments
+        out = rpc(agent, token, "tools/call", name="ggops_create_task", arguments={"title": "Ship mvp", "project": "p1"})
+        assert out["result"]["isError"] is False and "Ship mvp" in out["result"]["content"][0]["text"]
+        assert ggops["mcp"] == [("create_task", {"title": "Ship mvp", "project": "p1"})]
+
+        # a token GG-Ops refuses is refreshed and the call sent again (a 401 means nothing happened)
+        ggops["access"] = "gone"
+        assert rpc(agent, token, "tools/call", name="ggops_list_projects", arguments={})["result"]["isError"] is False
+        assert len(ggops["mcp"]) == 2
+
+        # the workspace token is no person: no GG-Ops tools, and a ggops_ call is refused
+        assert not [n for n in names(agent, shared) if n.startswith("ggops_")]
+        assert rpc(agent, shared, "tools/call", name="ggops_create_task", arguments={})["result"]["isError"]
+        assert len(ggops["mcp"]) == 2
+
+        # also in the URL, for clients that only take one; a new token ends the old one
+        assert agent.post(f"/mcp/{token}", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
+        new = alice.post("/api/settings/mcp/me/rotate").json()["token"]
+        assert agent.post(f"/mcp/{token}", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 401
+        assert agent.post(f"/mcp/{new}", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
 
 
 def test_gg_ops_database_is_refused():

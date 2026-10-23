@@ -123,7 +123,8 @@ INDEXES = {
     # bound memberships are unique per user; pending ones (made before the person first signed in) per login
     "members": [([(W, 1), ("user_id", 1)], {"unique": True, "partialFilterExpression": {"user_id": {"$type": "objectId"}}}),
                 ([(W, 1), ("login_lower", 1)], {"unique": True, "partialFilterExpression": {"pending": True}}),
-                ([("user_id", 1)], {}), ([("login_lower", 1), ("pending", 1)], {})],
+                ([("user_id", 1)], {}), ([("login_lower", 1), ("pending", 1)], {}),
+                ([("mcp_token_hash", 1)], {"unique": True, "partialFilterExpression": {"mcp_token_hash": {"$type": "string"}}})],
     "invites": [([("token_hash", 1)], UNIQUE), ([("id", 1)], UNIQUE), ([(W, 1), ("created_at", 1)], {})],
     "repos": [([(W, 1), ("repo_lower", 1)], UNIQUE), ([("repo_lower", 1)], {})],
     "api_clients": [([("client_id", 1)], UNIQUE), ([(W, 1)], {})],
@@ -293,8 +294,11 @@ def memberships(user_id):
 
 # ---------- workspaces and their repositories ----------
 
-def mcp_fields(token):
-    return {"mcp_token": secret.seal(token), "mcp_token_hash": secret.digest(token), "mcp_legacy": True}
+def mcp_fields(token, personal=False):
+    """An MCP token sealed (shown again in Settings) and its digest (how /mcp finds it). A workspace's legacy token can
+    be turned off; a person's own one (on their membership) can only be replaced."""
+    sealed = {"mcp_token": secret.seal(token), "mcp_token_hash": secret.digest(token)}
+    return sealed if personal else {**sealed, "mcp_legacy": True}
 
 
 def create_workspace(name, user):

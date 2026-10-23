@@ -10,8 +10,9 @@ A GG-Docs *workflow* is a GG-Ops project linked to a workspace. Its id (the proj
 credential: every read goes out with a GG-Ops credential, so GG-Ops's own access control decides.
 
 People connect their own GG-Ops account (GGOPS_URL + GGOPS_CLIENT_ID: GG-Docs is an OAuth client of GG-Ops's
-authorization server, PKCE, scope read). With that set, a person's reads go out with their own token and they see
-what GG-Ops shows them; API clients act as no person and keep the workspace's key.
+authorization server, PKCE, scope read write). With that set, a person's reads go out with their own token and they
+see what GG-Ops shows them; API clients act as no person and keep the workspace's key. Their MCP agents also reach
+GG-Ops's own MCP server as them (mcp_as), which is how an agent creates GG-Ops tasks.
 
 gg-pulse ("Pulse", github.com/CR-8/gg-pulse): the only HTTP API it has is GET /api/health, unauthenticated,
 {"ok": true} when it and its database are up. It has no analytics API to read yet, so this integration is a
@@ -247,7 +248,7 @@ def callback_url():
 
 def authorize_url(state, challenge):
     return f"{GGOPS_URL}/oauth/authorize?" + urlencode({
-        "response_type": "code", "client_id": GGOPS_CLIENT_ID, "redirect_uri": callback_url(), "scope": "read",
+        "response_type": "code", "client_id": GGOPS_CLIENT_ID, "redirect_uri": callback_url(), "scope": "read write",
         "code_challenge": challenge, "code_challenge_method": "S256", "state": state})
 
 
@@ -276,7 +277,8 @@ def save_tokens(user_id, t, upsert=False):
     """Refreshes update a connection that still exists; only connecting creates one (a disconnect wins a race)."""
     db.ggops_connections.update_one({"user_id": user_id}, {
         "$set": {"access_token": secret.seal(t["access_token"]), "refresh_token": secret.seal(t["refresh_token"]),
-                 "expires_at": time.time() + int(t.get("expires_in") or 3600), "updated_at": db.utcnow()},
+                 "expires_at": time.time() + int(t.get("expires_in") or 3600), "updated_at": db.utcnow(),
+                 "scope": t.get("scope") or ""},  # what GG-Ops granted: "read" for a connection made before writes
         "$setOnInsert": {"connected_at": db.utcnow()}}, upsert=upsert)
 
 
@@ -350,10 +352,46 @@ def get_as(user_id, path, what):
     return envelope(r, what)
 
 
+def mcp_as(user_id, method, params=None):
+    """One JSON-RPC call to GG-Ops's MCP server (/api/mcp) as this person: its result, or a ServiceError. Sent once and
+    never retried blind, since a tool call may create a task; only a refused token is refreshed and the call sent again,
+    because a 401 means GG-Ops did nothing."""
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+    token = access_token(user_id)
+    for attempt in (0, 1):
+        try:
+            r = HTTP.post(f"{GGOPS_URL}/api/mcp", json=body, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        except httpx.HTTPError as e:
+            raise ServiceError("unavailable", f"Could not reach GG-Ops ({type(e).__name__}).")
+        if r.status_code != 401:
+            break
+        if attempt:
+            raise ServiceError("reconnect", "GG-Ops no longer accepts this connection. Connect GG-Ops again.")
+        token = access_token(user_id, stale=token)
+    if r.status_code == 429:
+        raise ServiceError("rate_limited", "GG-Ops is rate limiting this connection; try again later.")
+    try:
+        msg = r.json()
+    except ValueError:
+        msg = None
+    if r.status_code != 200 or not isinstance(msg, dict):
+        raise ServiceError("unavailable", f"GG-Ops answered {r.status_code} on /api/mcp.")
+    if msg.get("error"):
+        e = msg["error"]
+        raise ServiceError("invalid", str(e.get("message") if isinstance(e, dict) else e))
+    return msg.get("result") or {}
+
+
 def user_board(user_id, workflow_id):
     """A linked workflow read as this person. The workflow's stored status is the workspace's and stays as it is:
     one person's 404 says nothing about anyone else's view."""
     return ggops_board(lambda path, what: get_as(user_id, path, what), workflow_id)
+
+
+def can_write(connection):
+    """Whether GG-Ops granted this connection write (create and edit tasks as them). Connections made when GG-Docs
+    asked for read only have no write until the person connects again."""
+    return "write" in (connection.get("scope") or "").split()
 
 
 def account(user_id):
@@ -362,7 +400,7 @@ def account(user_id):
     if not c:
         return {"connected": False}
     spaces = get_as(user_id, "/api/v1/workspaces", "workspace list")
-    return {"connected": True, "name": c.get("name"), "email": c.get("email"),
+    return {"connected": True, "name": c.get("name"), "email": c.get("email"), "write": can_write(c),
             "connected_at": c["connected_at"].isoformat(timespec="seconds"),
             "workspaces": [{k: w.get(k) for k in ("name", "slug", "role")} for w in spaces or [] if isinstance(w, dict)]}
 

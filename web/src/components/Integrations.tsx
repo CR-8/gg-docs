@@ -43,7 +43,7 @@ export function GitHubAccount({ me }: { me: NonNullable<Me> }) {
 }
 
 type GGOpsMe = {
-  enabled: boolean; connected: boolean; name?: string | null; email?: string | null; error?: string
+  enabled: boolean; connected: boolean; write?: boolean; name?: string | null; email?: string | null; error?: string
   workspaces?: { name: string; slug: string; role: string }[]
 }
 
@@ -57,16 +57,18 @@ export function GGOpsAccount() {
   const disconnect = () => confirm("Disconnect GG-Ops? The portal stops reading GG-Ops as you, and the connection is revoked in GG-Ops.") &&
     act(() => post("/api/v1/integrations/gg-ops/me", undefined, "DELETE"), "Disconnected.")
   return (
-    <Section title="Your GG-Ops account" description="Read-only, as you: linked GG-Ops projects show only what GG-Ops lets you see.">
+    <Section title="Your GG-Ops account" description="As you: linked GG-Ops projects show only what GG-Ops lets you see, and your coding agent's GG-Ops tools (Connect a coding agent) act as you.">
       <div className="flex flex-wrap items-center gap-3 text-sm">
         {a.connected ? (
           <>
             <span className="font-medium">{a.name || "Connected"}</span>
             {a.email && <span className="text-muted-foreground text-xs">{a.email}</span>}
             {a.workspaces && <span className="text-muted-foreground text-xs">{a.workspaces.map((w) => w.name).join(", ") || "No GG-Ops workspaces"}</span>}
+            <Tag tone={a.write ? "success" : "info"}>{a.write ? "read and write" : "read-only"}</Tag>
           </>
         ) : <span className="text-muted-foreground">Not connected</span>}
         <span className="ml-auto flex gap-2">
+          {a.connected && !a.write && <Button size="sm" variant="outline" asChild><a href="/connect/ggops?again=1">Allow task changes</a></Button>}
           {a.connected
             ? <Button size="sm" variant="ghost" onClick={disconnect}>Disconnect</Button>
             : <Button size="sm" asChild><a href="/connect/ggops">Connect GG-Ops</a></Button>}

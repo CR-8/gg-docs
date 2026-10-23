@@ -267,13 +267,14 @@ def to_settings(error=""):
 
 
 @app.get("/connect/ggops")
-def connect_ggops(request: Request):
-    """GG-Ops's "Open in GG-Docs" button. Connected already: straight in. Otherwise GG-Ops's consent screen, with a
-    one-time state and a PKCE challenge (GG-Ops issues no client secrets, so PKCE is the proof)."""
+def connect_ggops(request: Request, again: bool = False):
+    """GG-Ops's "Open in GG-Docs" button. Connected already: straight in, unless `again` (a connection made read-only
+    before, granting write now). Otherwise GG-Ops's consent screen, with a one-time state and a PKCE challenge (GG-Ops
+    issues no client secrets, so PKCE is the proof); the new connection replaces and revokes the old one."""
     if not integrations.ggops_oauth():
         return to_settings("GG-Ops sign-in is not set up on this portal (GGOPS_URL and GGOPS_CLIENT_ID).")
     user = current_user(request)
-    if db.ggops_connections.find_one({"user_id": user["id"]}):
+    if not again and db.ggops_connections.find_one({"user_id": user["id"]}):
         return to_settings()
     state, (verifier, challenge) = secrets.token_urlsafe(24), pkce()
     request.session["ggops_oauth"] = {"state": state, "verifier": verifier, "at": int(time.time())}
@@ -851,6 +852,42 @@ def rotate_mcp(request: Request):
     return mcp_settings(request)
 
 
+def my_mcp_view(token, user_id):
+    c = db.ggops_connections.find_one({"user_id": user_id})
+    return {"url": f"{PUBLIC_URL}/mcp", "token_url": f"{PUBLIC_URL}/mcp/{token}", "token": token,
+            "ggops": integrations.ggops_oauth(), "ggops_connected": bool(c), "ggops_write": bool(c) and integrations.can_write(c)}
+
+
+def my_membership(request):
+    user = current_user(request)
+    m = user and db.members.find_one({"workspace_id": WORKSPACE.get(), "user_id": user["id"]})
+    if not m:
+        raise HTTPException(403, "members of this workspace only")
+    return user, m
+
+
+@app.get("/api/settings/mcp/me")
+def my_mcp(request: Request):
+    """This person's own MCP token for this workspace, made on first use. Agents connected with it act as them, which
+    GG-Ops's tools need; any member can have one, and leaving the workspace ends it."""
+    user, m = my_membership(request)
+    token = secret.unseal(m.get("mcp_token"))
+    if not token:
+        token = secrets.token_urlsafe(24)
+        db.members.update_one({"_id": m["_id"]}, {"$set": db.mcp_fields(token, personal=True)})
+    return my_mcp_view(token, user["id"])
+
+
+@app.post("/api/settings/mcp/me/rotate")
+def rotate_my_mcp(request: Request):
+    """A new personal MCP token; agents using the old one stop working at once."""
+    user, m = my_membership(request)
+    token = secrets.token_urlsafe(24)
+    db.members.update_one({"_id": m["_id"]}, {"$set": db.mcp_fields(token, personal=True)})
+    db.audit("mcp_token.personal_rotated", user["login"])
+    return my_mcp_view(token, user["id"])
+
+
 @app.put("/api/settings/mcp")
 async def legacy_mcp(request: Request):
     """Turns the legacy MCP token off (agents then connect with an API client's mcp:read token) or back on."""
@@ -937,35 +974,41 @@ def doc(name: str, slug: str, download: bool = False):
 
 # ---------- MCP server (portal/mcp.py) ----------
 
-def mcp_workspace(token, header):
-    """The workspace an MCP request may read: the legacy workspace token (header or URL, unless turned off), or an API
-    client's access token with mcp:read (header only: bearer tokens never go in URLs)."""
+def mcp_principal(token, header):
+    """(workspace, person) for an MCP request, or None: a person's own MCP token (header or URL) is them in one
+    workspace; the legacy workspace token (header or URL, unless turned off) and an API client's access token with
+    mcp:read (header only: bearer tokens never go in URLs) are the workspace, with no person."""
     given = token or header
     if not given:
         return None
-    w = db.workspaces.find_one({"mcp_token_hash": secret.digest(given), "mcp_legacy": {"$ne": False}}, {"_id": 1})
+    digest = secret.digest(given)
+    m = db.members.find_one({"mcp_token_hash": digest, "pending": False}, {"workspace_id": 1, "user_id": 1})
+    if m:
+        return m["workspace_id"], m["user_id"]
+    w = db.workspaces.find_one({"mcp_token_hash": digest, "mcp_legacy": {"$ne": False}}, {"_id": 1})
     if w:
-        return w["_id"]
+        return w["_id"], None
     p = None if token else auth.token_principal(given)
-    return p["workspace_id"] if p and "mcp:read" in p["scopes"] else None
+    return (p["workspace_id"], None) if p and "mcp:read" in p["scopes"] else None
 
 
 @app.post("/mcp")
 @app.post("/mcp/{token}")
 async def mcp_endpoint(request: Request, token: str = ""):
     header = request.headers.get("authorization", "")
-    ws = await run_in_threadpool(mcp_workspace, token, header[7:].strip() if header[:7].lower() == "bearer " else "")
-    if ws is None:
+    who = await run_in_threadpool(mcp_principal, token, header[7:].strip() if header[:7].lower() == "bearer " else "")
+    if who is None:
         return JSONResponse({"error": "missing or unknown MCP token: copy it from Settings → Connect a coding agent"}, 401)
     try:
         body = await request.json()
     except ValueError:
         return JSONResponse(mcp.error(None, -32700, "Parse error"), 400)
+    ws, person = who
     with workspace(ws):
         if isinstance(body, list):  # batches (protocol 2025-03-26)
-            out = [r for r in [await run_in_threadpool(mcp.handle, m) for m in body] if r]
+            out = [r for r in [await run_in_threadpool(mcp.handle, m, person) for m in body] if r]
             return JSONResponse(out) if out else Response(status_code=202)
-        out = await run_in_threadpool(mcp.handle, body)
+        out = await run_in_threadpool(mcp.handle, body, person)
     return JSONResponse(out) if out else Response(status_code=202)
 
 

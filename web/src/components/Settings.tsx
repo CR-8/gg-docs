@@ -81,47 +81,73 @@ function StatusPanel({ admin }: { admin: boolean }) {
 const MCP_TOOLS = ["pull_requests", "pull_request", "recent_pushes", "docs", "query", "commit_diff", "code_graph", "architecture"]
 
 type McpInfo = { url: string; token_url: string | null; token: string | null; legacy: boolean }
+type MyMcp = { url: string; token_url: string; token: string; ggops: boolean; ggops_connected: boolean; ggops_write: boolean }
+
+const agentSnippets = (url: string, token: string, tokenUrl: string, who: string) => (
+  <>
+    <Snippet label={`Claude Code (${who})`} text={`claude mcp add --transport http gg ${url} --header "Authorization: Bearer ${token}"`} />
+    <Snippet label="Codex CLI" text={`codex mcp add gg --url ${tokenUrl}`} />
+    <Snippet
+      label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
+      text={tokenUrl}
+    />
+  </>
+)
 
 function Mcp({ admin }: { admin: boolean }) {
+  const mine = useApi<MyMcp>("/api/settings/mcp/me")
   const m = useApi<McpInfo>(admin ? "/api/settings/mcp" : null)
   const [msg, setMsg] = useState("")
-  const act = (fn: () => Promise<unknown>, done: string) =>
-    fn().then(() => { setMsg(done); m.reload() }, (e) => setMsg(e.message))
+  const act = (fn: () => Promise<unknown>, done: string, reload: () => void) =>
+    fn().then(() => { setMsg(done); reload() }, (e) => setMsg(e.message))
+  const g = mine.data
   return (
     <Section
       title={<span className="flex items-center gap-2"><Plug className="size-4" /> Connect a coding agent (MCP)</span>}
-      description="Give Claude Code, Codex, ChatGPT, Mistral, Cursor or any MCP client live, read-only access to this workspace's PRs, pushes, CI, reviews, docs and code graph."
+      description="Give Claude Code, Codex, ChatGPT, Mistral, Cursor or any MCP client this workspace's PRs, pushes, CI, reviews, docs and code graph, and GG-Ops's projects and tasks as you."
     >
-      {!admin ? (
-        <Note>An owner or admin can copy the connection details from this page.</Note>
-      ) : !m.data ? <Loading rows={3} /> : (
+      {!g ? <Loading rows={3} /> : (
         <div className="space-y-4">
           <p className="text-muted-foreground text-sm text-pretty">
-            Preferred: an <b>API client</b> with the <code className="font-mono text-xs">mcp:read</code> scope (below) gets a one-hour
-            token from <code className="font-mono text-xs">POST /api/v1/auth/token</code>; send it as <code className="font-mono text-xs">Authorization: Bearer</code>.
+            Your own token: an agent connected with it is <b>you</b> in this workspace. Keep it to yourself.
           </p>
-          {m.data.token ? (
-            <>
-              <Snippet label="Claude Code (workspace token)" text={`claude mcp add --transport http gg ${m.data.url} --header "Authorization: Bearer ${m.data.token}"`} />
-              <Snippet label="Codex CLI" text={`codex mcp add gg --url ${m.data.token_url}`} />
-              <Snippet
-                label="ChatGPT (developer mode), Mistral Le Chat, Cursor, Gemini CLI and others: add a remote MCP server with this URL and no authentication. The URL itself is the secret, so share it like a password."
-                text={m.data.token_url!}
-              />
-            </>
-          ) : <Note>The workspace token is off: agents connect with an API client's token only.</Note>}
+          {agentSnippets(g.url, g.token, g.token_url, "your token")}
+          {g.ggops && (
+            <p className="text-sm text-pretty">
+              {!g.ggops_connected ? <>Connect your GG-Ops account under <b>Your GG-Ops account</b> to add GG-Ops's tools (<code className="font-mono text-xs">ggops_*</code>).</>
+                : !g.ggops_write ? <>GG-Ops is connected read-only: connect it again under <b>Your GG-Ops account</b> to let your agent create and update tasks.</>
+                : <>GG-Ops's tools (<code className="font-mono text-xs">ggops_*</code>) are included: your agent can read and change your GG-Ops projects and tasks as you.</>}
+            </p>
+          )}
           <div className="flex flex-wrap items-center gap-2">
-            {m.data.legacy && (
-              <Button size="sm" variant="outline" onClick={() => confirm("Make a new workspace token? Agents using the old one stop working.") &&
-                act(() => post("/api/settings/mcp/rotate"), "New token made; the old one no longer works.")}><RefreshCw /> New token</Button>
-            )}
-            <Button size="sm" variant="ghost" onClick={() => act(() => post("/api/settings/mcp", { legacy: !m.data!.legacy }, "PUT"),
-              m.data!.legacy ? "Workspace token turned off." : "Workspace token turned on.")}>
-              {m.data.legacy ? "Turn the workspace token off" : "Turn the workspace token on"}
-            </Button>
+            <Button size="sm" variant="outline" onClick={() => confirm("Make a new token? Agents using your old one stop working.") &&
+              act(() => post("/api/settings/mcp/me/rotate"), "New token made; your old one no longer works.", mine.reload)}><RefreshCw /> New token</Button>
             {msg && <Note>{msg}</Note>}
           </div>
-          <div className="flex flex-wrap gap-1">{MCP_TOOLS.map((t) => <Tag key={t}>{t}</Tag>)}</div>
+          <div className="flex flex-wrap gap-1">
+            {MCP_TOOLS.map((t) => <Tag key={t}>{t}</Tag>)}
+            {g.ggops_connected && <Tag tone="info">ggops_*</Tag>}
+          </div>
+          {admin && m.data && (
+            <div className="space-y-3 border-t pt-4">
+              <p className="text-muted-foreground text-sm text-pretty">
+                <b className="text-foreground font-medium">Workspace token</b> (admins): the workspace, no person, so no GG-Ops tools. An <b>API client</b> with
+                the <code className="font-mono text-xs">mcp:read</code> scope (below) is the same, with a one-hour token from <code className="font-mono text-xs">POST /api/v1/auth/token</code>.
+              </p>
+              {m.data.token ? agentSnippets(m.data.url, m.data.token, m.data.token_url!, "workspace token")
+                : <Note>The workspace token is off: agents connect with personal tokens or an API client's token.</Note>}
+              <div className="flex flex-wrap items-center gap-2">
+                {m.data.legacy && (
+                  <Button size="sm" variant="outline" onClick={() => confirm("Make a new workspace token? Agents using the old one stop working.") &&
+                    act(() => post("/api/settings/mcp/rotate"), "New workspace token made; the old one no longer works.", m.reload)}><RefreshCw /> New workspace token</Button>
+                )}
+                <Button size="sm" variant="ghost" onClick={() => act(() => post("/api/settings/mcp", { legacy: !m.data!.legacy }, "PUT"),
+                  m.data!.legacy ? "Workspace token turned off." : "Workspace token turned on.", m.reload)}>
+                  {m.data.legacy ? "Turn the workspace token off" : "Turn the workspace token on"}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Section>
