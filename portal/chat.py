@@ -16,6 +16,7 @@ from .sync import views
 
 MAX_ROUNDS = 10
 MAX_OUT = int(os.environ.get("CHAT_TOOL_CHARS") or 20000)  # per tool result; smaller for a local model's context
+CHAT_EFFORT = os.environ.get("CHAT_EFFORT") or "low"  # Claude only: Ask's rounds mostly pick the next lookup
 CHAT_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT") or 300)  # seconds for a whole answer (install.sh: more for CPU)
 
 SYSTEM = """You are the engineering portal assistant of the {workspace} workspace. You answer questions about its
@@ -269,11 +270,16 @@ def system():
                "architecture have nothing yet; use docs for how the code is organised."))
 
 
-def answer(history, question):
-    """history: earlier [{role: user|assistant, content: text}] from the browser (text only, so no stale
-    thinking blocks are ever replayed). Returns the answer plus the tool calls made, for the UI."""
+def answer_events(history, question, stop=None):
+    """Ask, as it happens: {"step": {tool, input}} as each lookup starts, then {"answer", "steps"}. history: earlier
+    [{role: user|assistant, content: text}] from the browser (text only, so no stale thinking blocks are ever
+    replayed). stop (a threading.Event): end after the current round, when the person presses Stop.
+    Faster than the workspace's own model settings: lower effort (CHAT_EFFORT) and a cached prompt prefix."""
     deadline = time.monotonic() + CHAT_TIMEOUT
-    conv = llm.Conversation(system(), timeout=CHAT_TIMEOUT, retries=1)
+    cfg = llm.config()
+    if cfg.get("llm_effort"):  # empty for a model that takes no effort setting: left so
+        cfg = {**cfg, "llm_effort": CHAT_EFFORT}
+    conv = llm.Conversation(system(), cfg, timeout=CHAT_TIMEOUT, retries=1, cache=True)
     for m in history[-20:]:
         if m.get("role") == "user":
             conv.add_user(str(m.get("content", ""))[:8000])
@@ -283,18 +289,31 @@ def answer(history, question):
     steps, reply = [], None
     with llm.interactive():  # documentation and reviews wait while someone is asking
         for _ in range(MAX_ROUNDS):
+            if stop and stop.is_set():
+                return
             if time.monotonic() > deadline:
-                return {"answer": f"I ran out of time ({int(CHAT_TIMEOUT)} s) after {len(steps)} lookups. A local CPU "
-                                  "model is slow with questions that need many lookups: try a narrower question, or "
-                                  "a hosted model in Settings.", "steps": steps}
+                yield {"answer": f"I ran out of time ({int(CHAT_TIMEOUT)} s) after {len(steps)} lookups. A local CPU "
+                                 "model is slow with questions that need many lookups: try a narrower question, or "
+                                 "a hosted model in Settings.", "steps": steps}
+                return
             reply = conv.step(tools())
             if not reply.tool_calls:
-                return {"answer": reply.text, "steps": steps}
+                yield {"answer": reply.text, "steps": steps}
+                return
             results = []
             for call in reply.tool_calls:
+                yield {"step": {"tool": call.name, "input": call.args}}
                 out = run_tool(call.name, call.args)
                 steps.append({"tool": call.name, "input": call.args, "output": out[:1500]})
                 results.append((call.id, out))
             conv.add_tool_results(results)
-    return {"answer": reply.text or "I stopped after 10 lookups without a final answer; try a narrower question.",
-            "steps": steps}
+    yield {"answer": reply.text or "I stopped after 10 lookups without a final answer; try a narrower question.",
+           "steps": steps}
+
+
+def answer(history, question):
+    """The whole answer at once: {answer, steps}."""
+    final = None
+    for e in answer_events(history, question):
+        final = e if "answer" in e else final
+    return final

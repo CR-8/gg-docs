@@ -5,10 +5,12 @@ the API v1 for programs (API clients, integrations, login handoff), the generate
 """
 import difflib
 import io
+import asyncio
 import json
 import os
 import re
 import secrets
+import threading
 import time
 import zipfile
 from collections import defaultdict
@@ -22,7 +24,7 @@ from bson.errors import InvalidId
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pymongo.errors import DuplicateKeyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -747,10 +749,39 @@ async def ask(request: Request):
         raise HTTPException(400, "question is required")
     history = body.get("history")
     history = [m for m in history if isinstance(m, dict)] if isinstance(history, list) else []
-    try:
-        return await run_in_threadpool(chat.answer, history, question)
-    except llm.LLMError as e:
-        return JSONResponse({"error": str(e)}, status_code=502)
+    if not body.get("stream"):
+        try:
+            return await run_in_threadpool(chat.answer, history, question)
+        except llm.LLMError as e:
+            return JSONResponse({"error": str(e)}, status_code=502)
+    # Streamed (the Ask page): one line of JSON per event as it happens. One worker thread runs the whole answer, so
+    # the tenant is set once, on it; the page going away or pressing Stop ends it after the current round.
+    ws, loop, events, stop = WORKSPACE.get(), asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
+
+    def work():
+        put = lambda e: loop.call_soon_threadsafe(events.put_nowait, e)
+        with workspace(ws):
+            try:
+                for e in chat.answer_events(history, question, stop):
+                    put(e)
+            except llm.LLMError as e:
+                put({"error": str(e)})
+            except Exception as e:  # anything else: said, so the page isn't left waiting
+                put({"error": f"{type(e).__name__}: {e}"})
+            finally:
+                put(None)
+
+    loop.run_in_executor(None, work)
+
+    async def lines():
+        try:
+            while (e := await events.get()) is not None:
+                yield json.dumps(e, default=str) + "\n"
+        finally:
+            stop.set()
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 # ---------- settings and admin actions ----------

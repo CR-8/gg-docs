@@ -1,5 +1,7 @@
 {$DOMAIN} {
-	reverse_proxy portal:7000
+	reverse_proxy portal:7000 {
+		flush_interval -1 # Ask streams each lookup as it happens
+	}
 }
 
 # GG-Ops on the same server (the ggops profile in docker-compose.yml)

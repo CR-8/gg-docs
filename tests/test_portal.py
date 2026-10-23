@@ -427,3 +427,44 @@ def test_ask_goes_before_background_work():
         assert not entered.wait(0.3)  # documentation and reviews wait while someone is asking
     assert entered.wait(2)
     t.join()
+
+
+def test_ask_streams_each_lookup_at_low_effort(monkeypatch):
+    from fastapi.testclient import TestClient
+    from portal import chat, llm
+    from portal.main import app
+    seen = {}
+
+    class Model:  # one lookup, then the answer
+        def __init__(self, system, cfg=None, timeout=None, retries=None, cache=False):
+            seen.update(effort=cfg.get("llm_effort"), cache=cache)
+            self.rounds = 0
+
+        def add_user(self, text):
+            pass
+
+        def add_assistant_text(self, text):
+            pass
+
+        def add_tool_results(self, results):
+            seen["results"] = results
+
+        def step(self, tools=()):
+            self.rounds += 1
+            if self.rounds == 1:
+                return llm.Reply("", [llm.ToolCall("c1", "query", {"collection": "commits"})])
+            return llm.Reply("Three commits.", [])
+
+    monkeypatch.setattr(llm, "Conversation", Model)
+    monkeypatch.setattr(llm, "config", lambda: {"llm_kind": "anthropic", "llm_effort": "high"})
+    monkeypatch.setattr(chat, "run_tool", lambda name, args, limit=None: "3 rows")
+    with TestClient(app) as c:
+        sign_in(c, "alice")
+        r = c.post("/api/chat", json={"question": "How many commits?", "stream": True})
+        events = [json.loads(line) for line in r.text.splitlines() if line]
+        assert r.headers["content-type"].startswith("application/x-ndjson")
+        assert events[0] == {"step": {"tool": "query", "input": {"collection": "commits"}}}  # as the lookup starts
+        assert events[-1]["answer"] == "Three commits." and events[-1]["steps"][0]["output"] == "3 rows"
+        assert seen["effort"] == "low" and seen["cache"] and seen["results"] == [("c1", "3 rows")]
+        # not streamed: one JSON answer, as API clients get it
+        assert c.post("/api/chat", json={"question": "Again?"}).json()["answer"] == "Three commits."

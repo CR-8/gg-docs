@@ -114,8 +114,10 @@ def background():
 
 
 class Conversation:
-    def __init__(self, system, cfg=None, timeout=TIMEOUT, retries=3):
-        self.cfg = cfg or config()
+    def __init__(self, system, cfg=None, timeout=TIMEOUT, retries=3, cache=False):
+        """cache: Claude caches the prompt prefix (tools, system, conversation so far), so each round of a tool loop
+        reads it back instead of processing it again. Off for one-shot requests, where the cache write only costs."""
+        self.cfg, self.cache = cfg or config(), cache
         if not usable(self.cfg):
             raise LLMError("No LLM is configured. An admin can set one in Settings.")
         self.system, self.messages = system, []
@@ -158,6 +160,8 @@ class Conversation:
             kw["tools"] = anthropic_tools(tools)
         if self.cfg.get("llm_effort"):
             kw["output_config"] = {"effort": self.cfg["llm_effort"]}
+        if self.cache:
+            kw["cache_control"] = {"type": "ephemeral"}  # the last block: the whole prefix so far
         if (self.cfg.get("llm_base_url") or "") in OFFICIAL_ANTHROPIC and self.model in FALLBACK_MODELS:
             resp = self.client.beta.messages.create(**kw, betas=["server-side-fallback-2026-07-01"],
                                                     extra_body={"fallbacks": "default"})

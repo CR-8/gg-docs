@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
-import { ArrowUp, RotateCcw, Square } from "lucide-react"
-import { api, useApi } from "@/lib/api"
+import { ArrowUp, Check, RotateCcw, Square } from "lucide-react"
+import { useApi } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Spinner } from "@/components/kibo-ui/spinner"
@@ -28,6 +28,7 @@ export function Ask() {
   })
   const [text, setText] = useState("")
   const [busy, setBusy] = useState(false)
+  const [live, setLive] = useState<{ tool: string; input: unknown }[]>([]) // this answer's lookups so far
   const [elapsed, setElapsed] = useState(0)
   const stop = useRef<AbortController | null>(null)
   const end = useRef<HTMLDivElement>(null)
@@ -51,12 +52,40 @@ export function Ask() {
     setLog((l) => [...l, { role: "user", content: question }])
     setText("")
     setElapsed(0)
+    setLive([])
     setBusy(true)
     summary.reload() // is the docs writer using the model right now?
     stop.current = new AbortController()
     try {
-      const r = await api("/api/chat", { method: "POST", body: JSON.stringify({ history, question }), signal: stop.current.signal })
-      setLog((l) => [...l, { role: "assistant", content: r.answer, steps: r.steps }])
+      // streamed: a line of JSON per lookup as it starts, then the answer
+      const r = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: stop.current.signal,
+        body: JSON.stringify({ history, question, stream: true }),
+      })
+      if (r.status === 401) {
+        location.href = "/auth/login?next=/chat/"
+        return
+      }
+      if (!r.ok || !r.body) throw new Error((await r.json().catch(() => ({}))).error || r.statusText)
+      const reader = r.body.getReader(), text = new TextDecoder()
+      let buf = "", final: { answer: string; steps: Step[] } | null = null
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buf += text.decode(value, { stream: true })
+        for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+          const line = buf.slice(0, i)
+          buf = buf.slice(i + 1)
+          if (!line) continue
+          const e = JSON.parse(line)
+          if (e.error) throw new Error(e.error)
+          if (e.step) setLive((l) => [...l, e.step])
+          if (e.answer !== undefined) final = e
+        }
+      }
+      if (!final) throw new Error("The answer stopped before it was finished.")
+      const done = final
+      setLog((l) => [...l, { role: "assistant", content: done.answer, steps: done.steps }])
     } catch (e: any) {
       const text = e.name === "AbortError" ? "Stopped." : /timed? ?out/i.test(e.message)
         ? `The model didn't answer in time (${e.message}). A local CPU model is slow; a hosted model in Settings answers in seconds.`
@@ -114,6 +143,17 @@ export function Ask() {
               <Spinner variant="ellipsis" className="size-5" /> Looking it up… <span className="tabular-nums">{elapsed} s</span>
               <Button variant="ghost" size="xs" onClick={() => stop.current?.abort()}><Square /> Stop</Button>
             </div>
+            {!!live.length && (
+              <ol className="space-y-0.5 pl-7 text-xs">
+                {live.map((s, j) => (
+                  <li key={j} className="flex min-w-0 items-center gap-1.5">
+                    {j < live.length - 1 ? <Check className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" /> : <Spinner className="size-3 shrink-0" />}
+                    <b className="font-medium">{s.tool}</b>
+                    <code className="truncate font-mono">{JSON.stringify(s.input)}</code>
+                  </li>
+                ))}
+              </ol>
+            )}
             {elapsed > 20 && s?.docs_writing && (
               <p className="text-xs">The model is also writing documentation right now; it pauses between documents so this question goes first.</p>
             )}
