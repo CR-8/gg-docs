@@ -468,3 +468,13 @@ def test_ask_streams_each_lookup_at_low_effort(monkeypatch):
         assert seen["effort"] == "low" and seen["cache"] and seen["results"] == [("c1", "3 rows")]
         # not streamed: one JSON answer, as API clients get it
         assert c.post("/api/chat", json={"question": "Again?"}).json()["answer"] == "Three commits."
+
+
+def test_invite_email_reads_as_gg_pulse_and_escapes_names():
+    from portal.mail import invite_message
+    msg = invite_message("new@acme.example", "<b>Acme</b>", "alice", "https://pulse.example/invite/t0k3n", 7)
+    text = msg.get_body(("plain",)).get_content()
+    html = msg.get_body(("html",)).get_content()
+    assert msg["Subject"] == "alice invited you to <b>Acme</b> on gg-pulse" and msg["To"] == "new@acme.example"
+    assert "https://pulse.example/invite/t0k3n" in text and "expires in 7 days" in text and "Resend" not in text
+    assert 'href="https://pulse.example/invite/t0k3n"' in html and "&lt;b&gt;Acme&lt;/b&gt;" in html and "<b>Acme</b>" not in html
